@@ -1,0 +1,53 @@
+{
+  "milestone": "M3B",
+  "status": "complete",
+  "candidate_commit": "2db0cd6eaf9ff6ae85beacd66257a1dffa5278bf",
+  "evidence_levels": [
+    "static",
+    "automated",
+    "live_local_rollback_compatibility"
+  ],
+  "checks": {
+    "macos_host_unit_tests": "116_pass",
+    "host_cli_tests": "4_pass",
+    "macos_parent_death_tests": "4_pass",
+    "rust_protocol_tests": "6_pass",
+    "typescript_tests": "36_pass",
+    "firmware_host_tests": "1_pass",
+    "same_task_fifo": "100_jobs_pass_in_bounded_batches",
+    "global_concurrency": "2_pass",
+    "per_task_capacity": "12_transactional_pass",
+    "restart_recovery_and_stale_claim": "pass",
+    "stdin_only_exact_argv": "pass",
+    "bounded_jsonl_and_sanitized_stderr": "pass",
+    "macos_host_sigkill_process_group_cleanup": "pass",
+    "m2_binary_additive_schema_rollback": "pass_isolated_copy",
+    "independent_review": "gpt_5_6_sol_high_no_p0_p1_p2",
+    "oracle_used": false,
+    "fast_eval": "pass",
+    "secret_scan": "pass",
+    "source_and_license_audit": "pass",
+    "remote_ci": "pass"
+  },
+  "remote": {
+    "workflow_run": 30779604869,
+    "url": "https://github.com/Larkspur-Wang/easy-codex-input/actions/runs/30779604869",
+    "jobs": [
+      "host-and-protocol",
+      "ble-peripheral-simulator",
+      "firmware",
+      "macos-desktop"
+    ]
+  },
+  "retained_failures": [
+    "30779360765_linux_cfg_import_and_macos_overbroad_socket_assertion"
+  ],
+  "not_run": [
+    "real_codex_prompt_dispatch",
+    "desktop_hot_refresh",
+    "rollout_completion_observer",
+    "spark_summary_and_dashscope_tts",
+    "pwa_and_cloudflare_product_path",
+    "keyboard_hil"
+  ]
+}

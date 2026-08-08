@@ -1,0 +1,36 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.secret*
+secrets/
+*.pem
+*.p12
+*.key
+
+# App
+/node_modules/
+/target/
+app/**/node_modules/
+app/**/dist/
+app/**/target/
+app/desktop/src-tauri/gen/
+app/**/.wrangler/
+app/**/.vite/
+app/**/.dev.vars
+
+# Firmware
+/build-*/
+firmware/build*/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+
+# Local runtime data and secrets
+.local/
+artifacts/
+evidence/private/
+*.log
+.playwright-cli/
+tools/**/.build/
+tools/**/.swiftpm/

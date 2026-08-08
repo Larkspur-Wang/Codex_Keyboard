@@ -1,0 +1,5 @@
+Cargo.lock
+pnpm-lock.yaml
+target/
+app/**/dist/
+firmware/build*/

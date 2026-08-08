@@ -1,0 +1,46 @@
+{
+  "milestone": "M2B",
+  "status": "complete",
+  "candidate_commit": "57967cacda39d7aab7bb5f7feb05a45cdcb1b3c3",
+  "evidence_levels": ["static", "automated", "live_service"],
+  "checks": {
+    "host_unit_tests": "48_pass",
+    "host_cli_tests": "2_pass",
+    "macos_keychain_integration": "pass_background_no_ui",
+    "keychain_status": "installed_verified",
+    "dashscope_region": "cn_beijing",
+    "dashscope_model": "qwen3_tts_instruct_flash_realtime",
+    "dashscope_server_event": "session_created_valid_identifier",
+    "dashscope_transport": "https_proxy",
+    "verify_local_tls_harness": "pass_direct_and_connect",
+    "absolute_deadline_and_stalls": "pass",
+    "marker_value_and_recovery": "pass",
+    "source_path_safety_and_zeroization": "pass",
+    "fast_eval": "pass",
+    "secret_scan": "pass_after_live_import",
+    "source_and_license_audit": "pass",
+    "independent_review": "gpt_5_6_sol_high_no_p0_p1_p2",
+    "oracle_used": false,
+    "remote_ci": "pass"
+  },
+  "remote": {
+    "workflow_run": 30763338506,
+    "url": "https://github.com/Larkspur-Wang/easy-codex-input/actions/runs/30763338506",
+    "host_and_protocol_seconds": 70,
+    "macos_keychain_and_ble_simulator_seconds": 44,
+    "firmware_seconds": 158
+  },
+  "retained_failures": [
+    "30762291790_linux_portability_lint_failure",
+    "30762446018_interactive_keychain_ci_cancelled",
+    "30762969976_macos_deadline_assertion_too_tight"
+  ],
+  "not_run": [
+    "tts_pcm_generation_and_audio_quality",
+    "encrypted_tts_cache",
+    "daemon_socket_and_launchagent",
+    "cloudflare_relay",
+    "phone_playback",
+    "keyboard_hil"
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "milestone": "M2C",
+  "status": "complete",
+  "candidate_commit": "4b9f381d082fdd8b6abbd6adb6b069e9d5a29f40",
+  "evidence_levels": ["static", "automated"],
+  "checks": {
+    "macos_host_unit_tests": "68_pass",
+    "host_cli_tests": "2_pass",
+    "linux_host_unit_tests": "65_pass_exact_ci",
+    "cache_key_keychain_roundtrip": "pass_isolated_background_item",
+    "aes_256_gcm_aad_and_object_separation": "pass",
+    "key_marker_missing_corrupt_and_wrong_key": "fail_closed",
+    "atomic_no_replace_publication": "pass",
+    "one_hundred_subprocess_crash_cycles": "pass_all_six_boundaries",
+    "capacity_and_reconcile": "pass",
+    "descriptor_anchored_cleanup": "pass",
+    "exact_0700_0600_under_extreme_umask": "pass",
+    "duplicate_descriptor_lock_release": "pass_cache_state_store_and_import",
+    "post_lock_early_error_release": "pass",
+    "fast_eval": "pass",
+    "secret_scan": "pass",
+    "source_and_license_audit": "pass",
+    "independent_review": "gpt_5_6_sol_high_no_p0_p1_p2",
+    "oracle_used": false,
+    "remote_ci": "pass"
+  },
+  "remote": {
+    "workflow_run": 30767392136,
+    "url": "https://github.com/Larkspur-Wang/easy-codex-input/actions/runs/30767392136",
+    "host_and_protocol_seconds": 62,
+    "macos_keychain_and_ble_simulator_seconds": 43,
+    "firmware_seconds": 161
+  },
+  "retained_failures": ["30765679212_linux_flock_inheritance_race"],
+  "retained_cancelled_runs": ["30766714903_macos_unbounded_test_peer_timeout"],
+  "not_run": [
+    "real_dashscope_tts_pcm_generation",
+    "audio_quality_and_speaker_playback",
+    "disk_full_and_physical_power_loss",
+    "daemon_socket_and_launchagent",
+    "cloudflare_relay",
+    "phone_playback",
+    "keyboard_hil"
+  ]
+}

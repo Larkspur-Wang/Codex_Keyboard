@@ -1,0 +1,47 @@
+{
+  "milestone": "M3A",
+  "status": "complete",
+  "candidate_commit": "f6cd3c96a06751c4e2b988bc1313e23f73288220",
+  "evidence_levels": ["static", "automated", "live_local_read_only"],
+  "checks": {
+    "macos_host_unit_tests": "104_pass",
+    "linux_host_unit_tests": "101_pass_exact_ci",
+    "host_cli_tests": "4_pass",
+    "rust_protocol_tests": "6_pass",
+    "typescript_tests": "36_pass",
+    "firmware_host_tests": "1_pass",
+    "catalog_tests": "16_pass_macos_and_linux_non_root",
+    "binding_test": "1_pass",
+    "pinned_and_recent": "pass_16_plus_8_bounded",
+    "structural_subagent_filter": "pass",
+    "source_main_wal_shm_unchanged": "pass_live_and_fixture",
+    "snapshot_sigkill_reconciliation": "pass_real_child_sigkill",
+    "query_and_file_bounds": "pass",
+    "independent_review": "gpt_5_6_sol_high_no_p0_p1_p2",
+    "oracle_used": false,
+    "fast_eval": "pass",
+    "secret_scan": "pass",
+    "source_and_license_audit": "pass",
+    "remote_ci": "pass"
+  },
+  "remote": {
+    "workflow_run": 30776818678,
+    "url": "https://github.com/Larkspur-Wang/easy-codex-input/actions/runs/30776818678",
+    "jobs": [
+      "host-and-protocol",
+      "ble-peripheral-simulator",
+      "firmware",
+      "macos-desktop"
+    ]
+  },
+  "retained_failures": ["30776297424_linux_shared_tmp_owned_path_assumption"],
+  "not_run": [
+    "real_codex_prompt_dispatch",
+    "real_user_binding_write",
+    "desktop_hot_refresh",
+    "rollout_completion_observer",
+    "spark_summary_and_dashscope_tts",
+    "pwa_and_cloudflare_product_path",
+    "keyboard_hil"
+  ]
+}

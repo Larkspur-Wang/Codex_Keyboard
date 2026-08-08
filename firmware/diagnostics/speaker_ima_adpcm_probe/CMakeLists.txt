@@ -1,0 +1,11 @@
+idf_component_register(
+  SRCS
+    "ima_adpcm_decoder.cpp"
+    "speaker_ima_adpcm_probe.cpp"
+  INCLUDE_DIRS
+    "include"
+  PRIV_INCLUDE_DIRS
+    "."
+  REQUIRES
+    esp_common
+)

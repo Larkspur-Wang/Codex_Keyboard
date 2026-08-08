@@ -1,0 +1,76 @@
+{
+  "milestone": "M3",
+  "status": "complete",
+  "candidate_commit": "41e9bcb5fae8109c28bca0ec034e490db6487a5b",
+  "evidence_levels": [
+    "static",
+    "automated",
+    "live_codex_task",
+    "exact_commit_ci",
+    "desktop_boundary_observation"
+  ],
+  "checks": {
+    "macos_host_unit_tests": "142_pass",
+    "host_cli_tests": "4_pass",
+    "macos_parent_death_tests": "4_pass",
+    "rust_protocol_tests": "6_pass",
+    "runtime_gate_example_tests": "4_pass",
+    "typescript_tests": "36_pass",
+    "firmware_host_tests": "1_pass",
+    "observer_focused_tests": "20_pass",
+    "rollout_rotation_truncation_replay": "pass",
+    "bounded_incremental_scan_and_verification": "4_mib_per_poll_pass",
+    "strict_stream_utf8_and_json_differential": "pass",
+    "completion_cursor_atomicity": "pass",
+    "binding_transaction_revalidation": "pass",
+    "turn_pack_bounds_and_redaction": "pass",
+    "health_responsive_during_catalog_poll": "pass",
+    "real_catalog_allowlist": "pass",
+    "real_binding_slot_generation": "slot_1_generation_1_pass",
+    "direct_completion_inserted": 1,
+    "queued_completion_inserted": 1,
+    "total_completion_count": 2,
+    "distinct_completion_count": 2,
+    "restart_duplicate_inserted": 0,
+    "restart_replay_reported": 0,
+    "job_state": "completed",
+    "job_task_prompt_match": "pass",
+    "private_identifiers_emitted": false,
+    "archived_task_fails_closed_before_queue_side_effect": "pass",
+    "desktop_navigation_resolution": "pass",
+    "desktop_structured_hot_read": "not_exposed",
+    "runtime_state_crash_recovery": "pass",
+    "independent_review": "gpt_5_6_sol_high_p0_0_p1_0_p2_0_pass",
+    "oracle_used": false,
+    "fast_eval": "pass",
+    "secret_scan": "pass",
+    "source_and_license_audit": "pass",
+    "remote_ci": "pass"
+  },
+  "runtime": {
+    "catalog_transient_failures": 0,
+    "observer_transient_failures": 1,
+    "test_task_archived": true,
+    "programmatic_subagent_rejected": true,
+    "isolated_host_state": true
+  },
+  "remote": {
+    "workflow_run": 30821118374,
+    "url": "https://github.com/Larkspur-Wang/easy-codex-input/actions/runs/30821118374",
+    "jobs": [
+      "host-and-protocol",
+      "ble-peripheral-simulator",
+      "firmware",
+      "macos-desktop"
+    ],
+    "failed_cross_platform_discovery_run": 30820252172
+  },
+  "installed_runtime": {
+    "version_boundary": "m2_release_not_replaced_by_m3_candidate"
+  },
+  "not_run": [
+    "spark_summary_and_dashscope_tts",
+    "pwa_and_cloudflare_product_path",
+    "keyboard_hil"
+  ]
+}

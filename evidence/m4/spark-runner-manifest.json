@@ -1,0 +1,81 @@
+{
+  "milestone": "M4B",
+  "status": "complete",
+  "candidate_commit": "751f8d22f2957f2dca5c842812176fbac6aebca0",
+  "source_commits": [
+    "b436bef023d32646a70938420d567367e3a259bf",
+    "751f8d22f2957f2dca5c842812176fbac6aebca0"
+  ],
+  "evidence_levels": [
+    "static",
+    "automated",
+    "parent_death",
+    "live_codex_service"
+  ],
+  "runtime": {
+    "codex_cli": "0.145.0",
+    "model": "gpt-5.3-codex-spark"
+  },
+  "checks": {
+    "host_unit_tests": "167_pass",
+    "host_cli_tests": "4_pass",
+    "macos_integration_parent_death_tests": "6_pass",
+    "rust_protocol_tests": "6_pass",
+    "runtime_gate_example_tests": "4_pass",
+    "typescript_tests": "36_pass",
+    "firmware_host_tests": "1_pass",
+    "spark_focused_unit_tests": "13_pass",
+    "spark_parent_death_tests": "2_pass",
+    "live_spark_gate": "2_consecutive_pass",
+    "prompt_skills_instructions": 0,
+    "prompt_skill_path_mentions": 0,
+    "system_skill_files": 0,
+    "plugin_files": 0,
+    "persistent_runtime_rows": 0,
+    "workspace_max_nodes": 26,
+    "workspace_max_bytes": 2171757,
+    "prompt_workspace_max_nodes": 12,
+    "prompt_workspace_max_bytes": 483,
+    "active_run_directories_after_gate": 0,
+    "independent_review": "gpt_5_6_sol_high_p0_0_p1_0_p2_0_pass",
+    "oracle_used": false,
+    "fast_eval": "pass",
+    "secret_scan": "pass",
+    "source_and_license_audit": "pass",
+    "remote_ci": "pass"
+  },
+  "remote_ci_history": [
+    {
+      "run_id": 30834577645,
+      "commit": "b436bef023d32646a70938420d567367e3a259bf",
+      "conclusion": "failure",
+      "jobs": {
+        "macos_desktop": "pass",
+        "host_and_protocol": "fail_unused_macos_only_import_on_linux",
+        "ble_peripheral_simulator": "pass",
+        "firmware": "pass"
+      }
+    },
+    {
+      "run_id": 30835041538,
+      "commit": "751f8d22f2957f2dca5c842812176fbac6aebca0",
+      "conclusion": "success",
+      "jobs": {
+        "host_and_protocol": "pass",
+        "macos_desktop": "pass",
+        "ble_peripheral_simulator": "pass",
+        "firmware": "pass"
+      }
+    }
+  ],
+  "installed_runtime": {
+    "version_boundary": "m2_release_not_replaced_by_m4b_candidate"
+  },
+  "not_run": [
+    "dashscope_tts",
+    "wav_eiad_and_authenticated_cache_publication",
+    "real_tts_api_twenty_calls",
+    "user_audio_acceptance",
+    "pwa_cloudflare_keyboard_hil"
+  ]
+}

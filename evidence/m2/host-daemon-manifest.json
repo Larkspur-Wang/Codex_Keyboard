@@ -1,0 +1,35 @@
+{
+  "milestone": "M2D",
+  "status": "complete",
+  "candidate_commit": "cffe0d20ec27e7cfa62c077e6e22245060ab2f2b",
+  "evidence_levels": ["static", "automated", "live_macos_runtime"],
+  "checks": {
+    "host_tests_including_login_keychain_integrations": "87_pass",
+    "host_cli_tests": "4_pass",
+    "rust_protocol_tests": "6_pass",
+    "health_tests": "9_pass",
+    "launch_agent_tests": "8_pass",
+    "health_stress_rounds": "20_pass",
+    "sqlite_subprocess_sigkill_cycles": "100_pass_enqueue_claim_before_after_commit",
+    "linux_non_root_inode_race": "pass",
+    "typescript_tests": "36_pass",
+    "firmware_host_tests": "1_pass",
+    "macos_unsigned_app_bundle": "pass",
+    "launchd_install": "pass_live",
+    "launchd_sigkill_restart": "pass_live_pid_changed",
+    "launchd_upgrade": "pass_live_inode_pid_changed_hash_match",
+    "launchd_uninstall": "pass_live_state_preserved",
+    "manual_daemon_impersonation": "rejected_live",
+    "independent_review": "gpt-5.6-sol_high_no_p0_p1_p2",
+    "oracle_used": false,
+    "secret_scan": "pass",
+    "source_and_license_audit": "pass",
+    "full_fast_eval": "pass_after_reboot_with_login_keychain",
+    "login_startup": "pass_live_reboot_launchd_health",
+    "tauri_visual_healthy_offline_refresh_close": "pass_live",
+    "remote_ci": "pass_exact_commit_run_30773582976_four_jobs"
+  },
+  "not_run": [
+    "physical_keyboard_hil_out_of_scope_m2d"
+  ]
+}

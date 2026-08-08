@@ -1,0 +1,44 @@
+{
+  "milestone": "M2A",
+  "status": "complete",
+  "candidate_commit": "881b5624b98e15c836cbfeb2b2c307fd70e08970",
+  "evidence_levels": ["static", "automated"],
+  "checks": {
+    "host_tests": "14_pass",
+    "rust_protocol_tests": "6_pass",
+    "typescript_tests": "34_pass",
+    "firmware_host_tests": "1_pass",
+    "one_hundred_reopen_recovery_cycles": "pass",
+    "process_exclusive_lock": "pass_automated",
+    "immutable_request_replay": "pass",
+    "per_task_fifo": "pass",
+    "claim_generation_stale_completion": "pass",
+    "binding_generation_cas_and_overflow": "pass",
+    "directory_and_file_permissions": "pass_0700_0600",
+    "nested_symlink_and_path_identity": "pass",
+    "future_schema_no_journal_mode_mutation": "pass",
+    "fast_eval": "pass",
+    "secret_scan": "pass",
+    "source_and_license_audit": "pass",
+    "independent_review": "gpt-5.6-sol_high_no_p0_p1_p2",
+    "oracle_used": false,
+    "remote_ci": "pass"
+  },
+  "remote": {
+    "workflow_run": 30754424358,
+    "url": "https://github.com/Larkspur-Wang/easy-codex-input/actions/runs/30754424358",
+    "host_and_protocol_seconds": 56,
+    "firmware_seconds": 167,
+    "ble_simulator_seconds": 21
+  },
+  "not_run": [
+    "separate_process_sigkill_fault_injection",
+    "power_loss_fault_injection",
+    "disk_full_and_io_error_injection",
+    "database_corruption_recovery",
+    "launchagent_login_and_restart",
+    "keychain_and_dashscope_handshake",
+    "encrypted_tts_cache",
+    "keyboard_hil"
+  ]
+}

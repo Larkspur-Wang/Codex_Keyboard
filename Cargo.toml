@@ -1,0 +1,40 @@
+[workspace]
+members = [
+  "app/desktop/src-tauri",
+  "app/host",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/Larkspur-Wang/Codex_Keyboard"
+rust-version = "1.94"
+
+[workspace.dependencies]
+aes-gcm = "0.10.3"
+base64 = "0.22.1"
+hkdf = "0.12.4"
+hmac = "0.12.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+thiserror = "2.0.17"
+zeroize = "1.8.2"
+rusqlite = { version = "0.39.0", features = ["bundled", "hooks", "limits"] }
+tempfile = "3.27.0"
+fs2 = "0.4.3"
+libc = "0.2.189"
+uuid = { version = "1.18.1", features = ["v4"] }
+security-framework = "3.7.0"
+security-framework-sys = "2.17.0"
+core-foundation = "0.10.1"
+rustls = { version = "0.23.43", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-native-certs = "0.8.4"
+httparse = "1.10.1"
+sha1 = "0.10.7"
+signal-hook = "0.3.18"
+hidapi = "2.6.3"
+tauri = "2.11.5"
+tauri-build = "2.5.4"

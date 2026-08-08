@@ -1,0 +1,11 @@
+idf_component_register(
+  SRCS
+    "speaker_opus_probe.cpp"
+  INCLUDE_DIRS
+    "include"
+  PRIV_REQUIRES
+    esp_timer
+    heap
+  EMBED_FILES
+    "assets/easyinput_boot_probe.ogg"
+)
