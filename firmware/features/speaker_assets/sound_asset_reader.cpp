@@ -508,7 +508,7 @@ SoundAssetReadResult SoundAssetStreamDecoder::open_embedded(
     return SoundAssetReadResult::InvalidArgument;
   }
   if (encoded_bytes < kEiadHeaderBytes ||
-      encoded_bytes > kSoundPayloadMaxSize ||
+      encoded_bytes > kEmbeddedSoundAssetMaximumBytes ||
       encoded_bytes >
           std::numeric_limits<std::uint32_t>::max()) {
     return SoundAssetReadResult::InvalidResource;
@@ -526,7 +526,7 @@ SoundAssetReadResult SoundAssetStreamDecoder::open_embedded(
       read_le16(encoded + 10U) != kSoundAssetFrameSamples ||
       frame_count == 0U ||
       decoded_samples == 0U ||
-      decoded_samples > kMaximumBootSamples ||
+      decoded_samples > kEmbeddedSoundAssetMaximumSamples ||
       frame_count !=
           1U + ((decoded_samples - 1U) /
                 kSoundAssetFrameSamples) ||

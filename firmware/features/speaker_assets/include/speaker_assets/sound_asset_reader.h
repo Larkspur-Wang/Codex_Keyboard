@@ -10,6 +10,13 @@ namespace easy_input::speaker_assets {
 
 inline constexpr std::uint32_t kSoundAssetSampleRate = 48000U;
 inline constexpr std::uint16_t kSoundAssetFrameSamples = 480U;
+// LAN summary playback borrows an immutable EIAD buffer from PSRAM rather
+// than a 0x80000-byte flash sound bank. Keep this aligned with the authenticated
+// Codex playback wire limit instead of applying the shorter Boot asset limits.
+inline constexpr std::size_t kEmbeddedSoundAssetMaximumBytes =
+    4U * 1024U * 1024U;
+inline constexpr std::uint32_t kEmbeddedSoundAssetMaximumSamples =
+    static_cast<std::uint32_t>(UINT16_MAX) * kSoundAssetFrameSamples;
 inline constexpr std::size_t kSoundAssetFrameHeaderBytes = 6U;
 inline constexpr std::size_t kSoundAssetMaximumFramePayloadBytes = 240U;
 inline constexpr std::size_t kSoundAssetMaximumEncodedFrameBytes =

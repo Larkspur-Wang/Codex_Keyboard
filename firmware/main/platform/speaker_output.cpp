@@ -468,6 +468,9 @@ bool SpeakerOutput::submit_open_asset_request(
     std::uint32_t generation) {
   reset_probe_run(generation);
   if (!audio_io_arbiter_->try_begin_speaker(generation)) {
+    last_request_failure_ = audio_io_arbiter_->microphone_requested()
+        ? SpeakerRequestFailure::MicrophoneBusy
+        : SpeakerRequestFailure::OwnershipBusy;
     asset_decoder_.close();
     playback_.cancel(generation);
     playback_.mark_drained(generation);
@@ -525,15 +528,19 @@ bool SpeakerOutput::request_asset(
 bool SpeakerOutput::request_embedded_asset(
     const std::uint8_t* encoded,
     std::size_t encoded_bytes) {
+  last_request_failure_ = SpeakerRequestFailure::None;
   if (!ready() || worker_task_ == nullptr || tx_channel_ == nullptr) {
+    last_request_failure_ = SpeakerRequestFailure::NotReady;
     return false;
   }
   const auto ticket = playback_.request();
   if (!ticket.accepted) {
+    last_request_failure_ = SpeakerRequestFailure::PlaybackBusy;
     return false;
   }
   if (asset_decoder_.open_embedded(encoded, encoded_bytes) !=
       speaker_assets::SoundAssetReadResult::Ok) {
+    last_request_failure_ = SpeakerRequestFailure::InvalidAsset;
     playback_.cancel(ticket.generation);
     playback_.mark_drained(ticket.generation);
     return false;
@@ -774,6 +781,10 @@ ai_keyboard::SpeakerPlaybackPhase SpeakerOutput::phase() const {
 
 ai_keyboard::SpeakerPlaybackResult SpeakerOutput::last_result() const {
   return playback_.last_result();
+}
+
+SpeakerRequestFailure SpeakerOutput::last_request_failure() const {
+  return last_request_failure_;
 }
 
 void SpeakerOutput::task_entry(void* context) {

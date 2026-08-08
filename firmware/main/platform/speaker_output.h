@@ -23,6 +23,15 @@
 
 namespace easy_input {
 
+enum class SpeakerRequestFailure : std::uint8_t {
+  None = 0,
+  NotReady = 1,
+  PlaybackBusy = 2,
+  InvalidAsset = 3,
+  MicrophoneBusy = 4,
+  OwnershipBusy = 5,
+};
+
 class SpeakerOutput {
  public:
   esp_err_t begin(TaskHandle_t supervisor_task,
@@ -72,6 +81,7 @@ class SpeakerOutput {
   bool sleep_blocked() const;
   ai_keyboard::SpeakerPlaybackPhase phase() const;
   ai_keyboard::SpeakerPlaybackResult last_result() const;
+  SpeakerRequestFailure last_request_failure() const;
 
  private:
   enum class RequestKind : std::uint8_t {
@@ -164,6 +174,8 @@ class SpeakerOutput {
   bool power_ready_sent_ = false;
   std::uint32_t reserved_generation_ = 0;
   std::uint32_t completed_reservation_generation_ = 0;
+  SpeakerRequestFailure last_request_failure_ =
+      SpeakerRequestFailure::None;
 
   std::atomic<std::uint32_t> requested_generation_{0};
   std::atomic<std::uint8_t> requested_kind_{

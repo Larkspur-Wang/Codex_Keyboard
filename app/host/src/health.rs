@@ -1,4 +1,3 @@
-#[cfg(all(target_os = "macos", not(test)))]
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -9,21 +8,23 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[cfg(all(target_os = "macos", not(test)))]
-use crate::audio::inspect_eiad;
+use crate::audio::{inspect_eiad, inspect_eiad_signal, transcode_eiad_for_device};
 use crate::bindings::BindingService;
 #[cfg(all(target_os = "macos", not(test)))]
 use crate::cache::{CacheId, CacheStore};
 use crate::codex_catalog::{CatalogError, CodexTaskCatalog};
 use crate::codex_runner::{CodexRunner, CodexRunnerConfig};
+use crate::dashscope::{ASR_MODEL, TTS_MODEL};
 #[cfg(all(target_os = "macos", not(test)))]
 use crate::lan_playback::{PLAYBACK_CHUNK_BYTES, PlaybackBegin, PlaybackIdentity};
 #[cfg(all(target_os = "macos", not(test)))]
@@ -33,8 +34,11 @@ use crate::paths::{AppPaths, open_owned_directory_chain};
 use crate::prompt_queue::{DurablePromptScheduler, PromptQueueService};
 use crate::rollout_observer::{ObserverError, RolloutObserver};
 #[cfg(all(target_os = "macos", not(test)))]
+use crate::secrets::{DashScopeEnvStore, ImportLock, KeychainAccounts, dashscope_key_is_installed};
+#[cfg(all(target_os = "macos", not(test)))]
 use crate::store::SummaryPlaybackLease;
 use crate::store::{StateStore, StoreError};
+use crate::summary_orchestrator::SUMMARY_TTS_VOICE;
 
 pub const HEALTH_PROTOCOL_VERSION: u8 = 1;
 pub const HEALTH_SOCKET_NAME: &str = "host.sock";
@@ -71,6 +75,8 @@ pub enum HealthError {
     ResponseTooLarge,
     #[error("Host health peer returned an invalid response")]
     InvalidResponse,
+    #[error("Host rejected the request: {0}")]
+    Rejected(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,16 +99,20 @@ pub enum HealthState {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HealthRequest {
-    v: u8,
-    op: HealthOperation,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum HealthOperation {
-    Health,
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum HostRequest {
+    Health {
+        v: u8,
+    },
+    Dashboard {
+        v: u8,
+    },
+    BindSlot {
+        v: u8,
+        slot: u8,
+        task_id: String,
+        expected_generation: Option<u64>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -111,6 +121,60 @@ struct ErrorReply {
     v: u8,
     ok: bool,
     error: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DashboardTask {
+    pub task_id: String,
+    pub name: String,
+    pub project: String,
+    pub updated_at_ms: u64,
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DashboardSlot {
+    pub slot: u8,
+    pub task_id: Option<String>,
+    pub task_name: Option<String>,
+    pub project: Option<String>,
+    pub binding_generation: Option<u64>,
+    pub pending_jobs: u32,
+    pub unread_generation: Option<u64>,
+    pub unread_coverage: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSnapshot {
+    pub configured: bool,
+    pub region: String,
+    pub asr_model: String,
+    pub tts_model: String,
+    pub voice: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DashboardSnapshot {
+    pub v: u8,
+    pub tasks: Vec<DashboardTask>,
+    pub slots: Vec<DashboardSlot>,
+    pub provider: ProviderSnapshot,
+}
+
+enum ControlRequest {
+    Dashboard {
+        reply: mpsc::SyncSender<Result<DashboardSnapshot, &'static str>>,
+    },
+    BindSlot {
+        slot: u8,
+        task_id: String,
+        expected_generation: Option<u64>,
+        reply: mpsc::SyncSender<Result<DashboardSnapshot, &'static str>>,
+    },
 }
 
 pub struct HostDaemon {
@@ -182,6 +246,7 @@ impl HostDaemon {
     pub fn serve_until(mut self, shutdown: Arc<AtomicBool>) -> Result<(), HealthError> {
         self.listener.set_nonblocking(true)?;
         let active_clients = Arc::new(AtomicUsize::new(0));
+        let (control_sender, control_receiver) = mpsc::sync_channel::<ControlRequest>(16);
         let mut observer = self
             .observer
             .take()
@@ -254,14 +319,29 @@ impl HostDaemon {
                 result = Err(error.into());
                 break;
             }
+            for _ in 0..8 {
+                let command = match control_receiver.try_recv() {
+                    Ok(command) => command,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                };
+                process_control_request(
+                    command,
+                    &mut self.store,
+                    &self.catalog,
+                    #[cfg(all(target_os = "macos", not(test)))]
+                    &self.paths,
+                );
+            }
             match self.listener.accept() {
                 Ok((stream, _)) => {
                     if reserve_client(&active_clients) {
                         let snapshot = Arc::clone(&self.snapshot);
                         let active_clients = Arc::clone(&active_clients);
+                        let control_sender = control_sender.clone();
                         thread::spawn(move || {
                             let _reservation = ClientReservation(active_clients);
-                            let _ = handle_client(stream, &snapshot);
+                            let _ = handle_client(stream, &snapshot, &control_sender);
                         });
                     }
                 }
@@ -371,6 +451,11 @@ fn handle_lan_playback_event(
             }
             if let Err(error) = store.cancel_summary_playback(&playback.lease) {
                 eprintln!("lan_playback=cancel_failed error={error}");
+            } else {
+                eprintln!(
+                    "lan_playback=cancelled slot={} generation={}",
+                    identity.slot, identity.summary_generation
+                );
             }
         }
     }
@@ -427,7 +512,10 @@ fn begin_lan_playback(
                 acquired = Some(lease);
                 break;
             }
-            Ok(None) => return Ok(()),
+            Ok(None) => {
+                eprintln!("lan_playback=no_unread slot={}", request.request.slot);
+                return Ok(());
+            }
             Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)))
                 if error.code == rusqlite::ErrorCode::ConstraintViolation => {}
             Err(error) => return Err(error.to_string()),
@@ -439,15 +527,19 @@ fn begin_lan_playback(
         let bundle = cache.read(&id).map_err(|error| error.to_string())?;
         let info =
             inspect_eiad(bundle.device_eiad.as_slice()).map_err(|error| error.to_string())?;
-        if bundle.device_eiad.as_slice().len() > u32::MAX as usize {
+        let device_eiad = transcode_eiad_for_device(bundle.device_eiad.as_slice())
+            .map_err(|error| error.to_string())?;
+        if device_eiad.len() > u32::MAX as usize {
             return Err("EIAD exceeds wire size".to_owned());
         }
         Ok::<_, String>((
-            zeroize::Zeroizing::new(bundle.device_eiad.as_slice().to_vec()),
+            device_eiad,
             info.samples,
+            inspect_eiad_signal(bundle.device_eiad.as_slice())
+                .map_err(|error| error.to_string())?,
         ))
     })();
-    let (eiad, total_samples) = match loaded {
+    let (eiad, total_samples, signal) = match loaded {
         Ok(loaded) => loaded,
         Err(error) => {
             let _ = store.cancel_summary_playback(&lease);
@@ -481,6 +573,15 @@ fn begin_lan_playback(
             heard_committed: false,
         },
     );
+    eprintln!(
+        "lan_playback=started slot={} generation={} bytes={} samples={} peak={} rms_permille={}",
+        identity.slot,
+        identity.summary_generation,
+        begin.total_bytes,
+        begin.total_samples,
+        signal.absolute_peak,
+        signal.rms_permille
+    );
     Ok(())
 }
 
@@ -500,15 +601,166 @@ fn reserve_client(active: &AtomicUsize) -> bool {
         .is_ok()
 }
 
-fn handle_client(mut stream: UnixStream, snapshot: &HealthSnapshot) -> Result<(), HealthError> {
+fn process_control_request(
+    request: ControlRequest,
+    store: &mut StateStore,
+    catalog: &CodexTaskCatalog,
+    #[cfg(all(target_os = "macos", not(test)))] paths: &AppPaths,
+) {
+    match request {
+        ControlRequest::Dashboard { reply } => {
+            let _ = reply.send(build_dashboard(
+                store,
+                catalog,
+                #[cfg(all(target_os = "macos", not(test)))]
+                paths,
+            ));
+        }
+        ControlRequest::BindSlot {
+            slot,
+            task_id,
+            expected_generation,
+            reply,
+        } => {
+            let result = BindingService::new(catalog)
+                .bind(store, slot, expected_generation, &task_id)
+                .map_err(|_| "binding_failed")
+                .and_then(|binding| binding.ok_or("stale_binding"))
+                .and_then(|_| {
+                    build_dashboard(
+                        store,
+                        catalog,
+                        #[cfg(all(target_os = "macos", not(test)))]
+                        paths,
+                    )
+                });
+            let _ = reply.send(result);
+        }
+    }
+}
+
+fn build_dashboard(
+    store: &StateStore,
+    catalog: &CodexTaskCatalog,
+    #[cfg(all(target_os = "macos", not(test)))] paths: &AppPaths,
+) -> Result<DashboardSnapshot, &'static str> {
+    let tasks = catalog.list_tasks().map_err(|_| "catalog_failed")?;
+    let task_lookup = tasks
+        .iter()
+        .map(|task| (task.task_id.as_str(), task))
+        .collect::<BTreeMap<_, _>>();
+    let bindings = store.bindings().map_err(|_| "state_failed")?;
+    let binding_lookup = bindings
+        .iter()
+        .map(|binding| (binding.slot, binding))
+        .collect::<BTreeMap<_, _>>();
+    let mut slots = Vec::with_capacity(4);
+    for slot in 1..=4 {
+        let binding = binding_lookup.get(&slot).copied();
+        let task = binding.and_then(|binding| task_lookup.get(binding.task_id.as_str()).copied());
+        let pending_jobs = binding
+            .map(|binding| store.pending_count(&binding.task_id))
+            .transpose()
+            .map_err(|_| "state_failed")?
+            .unwrap_or(0);
+        let unread = binding
+            .map(|binding| store.current_unread_summary(&binding.task_id))
+            .transpose()
+            .map_err(|_| "state_failed")?
+            .flatten();
+        slots.push(DashboardSlot {
+            slot,
+            task_id: binding.map(|binding| binding.task_id.clone()),
+            task_name: task.map(|task| task.name.clone()),
+            project: task.map(|task| task.project.clone()),
+            binding_generation: binding.map(|binding| binding.generation),
+            pending_jobs,
+            unread_generation: unread.as_ref().map(|summary| summary.generation),
+            unread_coverage: unread.as_ref().map(|summary| summary.coverage_count),
+        });
+    }
+    let tasks = tasks
+        .into_iter()
+        .map(|task| DashboardTask {
+            task_id: task.task_id,
+            name: task.name,
+            project: task.project,
+            updated_at_ms: task.updated_at_ms,
+            pinned: task.pinned,
+        })
+        .collect();
+    Ok(DashboardSnapshot {
+        v: HEALTH_PROTOCOL_VERSION,
+        tasks,
+        slots,
+        provider: ProviderSnapshot {
+            configured: dashscope_ready(
+                #[cfg(all(target_os = "macos", not(test)))]
+                paths,
+            ),
+            region: "cn-beijing".to_owned(),
+            asr_model: ASR_MODEL.to_owned(),
+            tts_model: TTS_MODEL.to_owned(),
+            voice: SUMMARY_TTS_VOICE.to_owned(),
+        },
+    })
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn dashscope_ready(paths: &AppPaths) -> bool {
+    let Ok(import_lock) = ImportLock::acquire(&paths.runtime_directory.join("key-import.lock"))
+    else {
+        return false;
+    };
+    let Ok(accounts) = KeychainAccounts::load_or_create(&paths.installation_id, &import_lock)
+    else {
+        return false;
+    };
+    let environment = DashScopeEnvStore::new(paths.dashscope_env.clone(), &accounts);
+    dashscope_key_is_installed(&environment, &accounts).unwrap_or(false)
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn dashscope_ready() -> bool {
+    false
+}
+
+fn handle_client(
+    mut stream: UnixStream,
+    snapshot: &HealthSnapshot,
+    control: &mpsc::SyncSender<ControlRequest>,
+) -> Result<(), HealthError> {
     let deadline = Instant::now() + CLIENT_IO_TIMEOUT;
     let request_bytes = read_bounded(&mut stream, MAX_REQUEST_BYTES, LimitKind::Request, deadline)?;
-    let request = serde_json::from_slice::<HealthRequest>(&request_bytes);
+    let request = serde_json::from_slice::<HostRequest>(&request_bytes);
     match request {
-        Ok(HealthRequest {
+        Ok(HostRequest::Health {
             v: HEALTH_PROTOCOL_VERSION,
-            op: HealthOperation::Health,
         }) => write_json_line(&mut stream, snapshot, deadline),
+        Ok(HostRequest::Dashboard {
+            v: HEALTH_PROTOCOL_VERSION,
+        }) => forward_control(
+            &mut stream,
+            control,
+            |reply| ControlRequest::Dashboard { reply },
+            deadline,
+        ),
+        Ok(HostRequest::BindSlot {
+            v: HEALTH_PROTOCOL_VERSION,
+            slot,
+            task_id,
+            expected_generation,
+        }) => forward_control(
+            &mut stream,
+            control,
+            |reply| ControlRequest::BindSlot {
+                slot,
+                task_id,
+                expected_generation,
+                reply,
+            },
+            deadline,
+        ),
         _ => write_json_line(
             &mut stream,
             &ErrorReply {
@@ -521,34 +773,48 @@ fn handle_client(mut stream: UnixStream, snapshot: &HealthSnapshot) -> Result<()
     }
 }
 
-pub fn query_health(socket_path: &Path) -> Result<HealthSnapshot, HealthError> {
-    let socket_identity = validate_private_socket(socket_path)?;
-    let mut stream = connect_with_deadline(socket_path, CONNECT_TIMEOUT)
-        .map_err(|error| health_context(error, "connect"))?;
-    let connected_identity = validate_private_socket(socket_path)?;
-    if socket_identity != connected_identity {
-        return Err(HealthError::UnsafeSocket);
+fn forward_control(
+    stream: &mut UnixStream,
+    control: &mpsc::SyncSender<ControlRequest>,
+    request: impl FnOnce(mpsc::SyncSender<Result<DashboardSnapshot, &'static str>>) -> ControlRequest,
+    deadline: Instant,
+) -> Result<(), HealthError> {
+    let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+    if control.try_send(request(reply_sender)).is_err() {
+        return write_json_line(
+            stream,
+            &ErrorReply {
+                v: HEALTH_PROTOCOL_VERSION,
+                ok: false,
+                error: "host_busy",
+            },
+            deadline,
+        );
     }
-    let deadline = Instant::now() + CLIENT_IO_TIMEOUT;
-    write_json_line(
-        &mut stream,
-        &HealthRequest {
+    let response = reply_receiver
+        .recv_timeout(remaining(deadline)?)
+        .map_err(|_| HealthError::InvalidResponse)?;
+    match response {
+        Ok(snapshot) => write_json_line(stream, &snapshot, deadline),
+        Err(error) => write_json_line(
+            stream,
+            &ErrorReply {
+                v: HEALTH_PROTOCOL_VERSION,
+                ok: false,
+                error,
+            },
+            deadline,
+        ),
+    }
+}
+
+pub fn query_health(socket_path: &Path) -> Result<HealthSnapshot, HealthError> {
+    let health: HealthSnapshot = query_host(
+        socket_path,
+        &HostRequest::Health {
             v: HEALTH_PROTOCOL_VERSION,
-            op: HealthOperation::Health,
         },
-        deadline,
-    )
-    .map_err(|error| health_context(error, "write request"))?;
-    let _ = stream.shutdown(std::net::Shutdown::Write);
-    let response = read_bounded(
-        &mut stream,
-        MAX_RESPONSE_BYTES,
-        LimitKind::Response,
-        deadline,
-    )
-    .map_err(|error| health_context(error, "read response"))?;
-    let health: HealthSnapshot =
-        serde_json::from_slice(&response).map_err(|_| HealthError::InvalidResponse)?;
+    )?;
     if health.v != HEALTH_PROTOCOL_VERSION
         || health.socket != format!("run/{HEALTH_SOCKET_NAME}")
         || health.host_version.is_empty()
@@ -557,6 +823,120 @@ pub fn query_health(socket_path: &Path) -> Result<HealthSnapshot, HealthError> {
         return Err(HealthError::InvalidResponse);
     }
     Ok(health)
+}
+
+pub fn query_dashboard(socket_path: &Path) -> Result<DashboardSnapshot, HealthError> {
+    let dashboard = query_host(
+        socket_path,
+        &HostRequest::Dashboard {
+            v: HEALTH_PROTOCOL_VERSION,
+        },
+    )?;
+    validate_dashboard(&dashboard)?;
+    Ok(dashboard)
+}
+
+pub fn bind_dashboard_slot(
+    socket_path: &Path,
+    slot: u8,
+    task_id: &str,
+    expected_generation: Option<u64>,
+) -> Result<DashboardSnapshot, HealthError> {
+    if !(1..=4).contains(&slot)
+        || uuid::Uuid::parse_str(task_id).is_err()
+        || expected_generation == Some(0)
+    {
+        return Err(HealthError::InvalidResponse);
+    }
+    let dashboard = query_host(
+        socket_path,
+        &HostRequest::BindSlot {
+            v: HEALTH_PROTOCOL_VERSION,
+            slot,
+            task_id: task_id.to_owned(),
+            expected_generation,
+        },
+    )?;
+    validate_dashboard(&dashboard)?;
+    Ok(dashboard)
+}
+
+fn query_host<T: DeserializeOwned>(
+    socket_path: &Path,
+    request: &HostRequest,
+) -> Result<T, HealthError> {
+    let socket_identity = validate_private_socket(socket_path)?;
+    let mut stream = connect_with_deadline(socket_path, CONNECT_TIMEOUT)
+        .map_err(|error| health_context(error, "connect"))?;
+    let connected_identity = validate_private_socket(socket_path)?;
+    if socket_identity != connected_identity {
+        return Err(HealthError::UnsafeSocket);
+    }
+    let deadline = Instant::now() + CLIENT_IO_TIMEOUT;
+    write_json_line(&mut stream, request, deadline)
+        .map_err(|error| health_context(error, "write request"))?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let response = read_bounded(
+        &mut stream,
+        MAX_RESPONSE_BYTES,
+        LimitKind::Response,
+        deadline,
+    )
+    .map_err(|error| health_context(error, "read response"))?;
+    if let Ok(error) = serde_json::from_slice::<ErrorReplyOwned>(&response)
+        && error.v == HEALTH_PROTOCOL_VERSION
+        && !error.ok
+        && !error.error.is_empty()
+    {
+        return Err(HealthError::Rejected(error.error));
+    }
+    serde_json::from_slice(&response).map_err(|_| HealthError::InvalidResponse)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ErrorReplyOwned {
+    v: u8,
+    ok: bool,
+    error: String,
+}
+
+fn validate_dashboard(dashboard: &DashboardSnapshot) -> Result<(), HealthError> {
+    if dashboard.v != HEALTH_PROTOCOL_VERSION
+        || dashboard.tasks.len()
+            > crate::codex_catalog::MAX_PINNED_TASKS + crate::codex_catalog::MAX_RECENT_TASKS
+        || dashboard.slots.len() != 4
+        || dashboard.provider.region != "cn-beijing"
+        || dashboard.provider.asr_model != ASR_MODEL
+        || dashboard.provider.tts_model != TTS_MODEL
+        || dashboard.provider.voice != SUMMARY_TTS_VOICE
+    {
+        return Err(HealthError::InvalidResponse);
+    }
+    let mut task_ids = std::collections::BTreeSet::new();
+    for task in &dashboard.tasks {
+        if uuid::Uuid::parse_str(&task.task_id).is_err()
+            || task.name.is_empty()
+            || task.project.is_empty()
+            || !task_ids.insert(task.task_id.as_str())
+        {
+            return Err(HealthError::InvalidResponse);
+        }
+    }
+    let mut slots = std::collections::BTreeSet::new();
+    for slot in &dashboard.slots {
+        if !(1..=4).contains(&slot.slot)
+            || !slots.insert(slot.slot)
+            || slot.binding_generation == Some(0)
+            || slot
+                .task_id
+                .as_deref()
+                .is_some_and(|task_id| uuid::Uuid::parse_str(task_id).is_err())
+        {
+            return Err(HealthError::InvalidResponse);
+        }
+    }
+    Ok(())
 }
 
 fn health_context(error: HealthError, operation: &'static str) -> HealthError {
@@ -603,7 +983,7 @@ fn read_bounded(
     let mut bytes = Vec::with_capacity(limit.min(1024));
     let mut chunk = [0_u8; 1024];
     loop {
-        stream.set_read_timeout(Some(remaining(deadline)?))?;
+        wait_readable(stream.as_raw_fd(), deadline)?;
         match stream.read(&mut chunk) {
             Ok(0) => return Err(HealthError::InvalidResponse),
             Ok(read) => {
@@ -627,6 +1007,32 @@ fn read_bounded(
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn wait_readable(descriptor: RawFd, deadline: Instant) -> Result<(), HealthError> {
+    loop {
+        let timeout = remaining(deadline)?;
+        let timeout_ms = timeout
+            .as_millis()
+            .saturating_add(u128::from(timeout.subsec_nanos() % 1_000_000 != 0))
+            .min(i32::MAX as u128) as i32;
+        let mut poll_descriptor = libc::pollfd {
+            fd: descriptor,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut poll_descriptor, 1, timeout_ms) };
+        if ready > 0 {
+            return Ok(());
+        }
+        if ready == 0 {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "read deadline exceeded").into());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error.into());
         }
     }
 }
@@ -967,9 +1373,55 @@ fn connect_descriptor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::{Connection, params};
+    use serde_json::json;
     use std::os::unix::fs::symlink;
     use std::sync::Barrier;
     use tempfile::tempdir;
+
+    const DASHBOARD_TASK: &str = "019fa972-5cfa-75e1-9008-0b17ade9a347";
+
+    fn write_dashboard_catalog(codex_home: &Path) {
+        fs::create_dir_all(codex_home.join("sessions")).unwrap();
+        fs::write(codex_home.join("sessions/a.jsonl"), b"").unwrap();
+        fs::write(
+            codex_home.join(".codex-global-state.json"),
+            serde_json::to_vec(&json!({
+                "pinned-thread-ids": [DASHBOARD_TASK],
+                "electron-persisted-atom-state": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            codex_home.join("session_index.jsonl"),
+            format!("{{\"id\":\"{DASHBOARD_TASK}\",\"thread_name\":\"Keyboard Task\"}}\n"),
+        )
+        .unwrap();
+        let connection = Connection::open(codex_home.join("state_5.sqlite")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (
+                    id TEXT PRIMARY KEY, name TEXT, title TEXT NOT NULL, cwd TEXT NOT NULL,
+                    rollout_path TEXT NOT NULL, updated_at INTEGER NOT NULL,
+                    updated_at_ms INTEGER, recency_at_ms INTEGER NOT NULL,
+                    archived INTEGER NOT NULL, source TEXT, thread_source TEXT,
+                    agent_role TEXT
+                 );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads VALUES
+                 (?1, 'Keyboard Task', '', '/work/keyboard', ?2, 1, 1000, 1000, 0,
+                  'vscode', 'user', NULL)",
+                params![
+                    DASHBOARD_TASK,
+                    codex_home.join("sessions/a.jsonl").to_string_lossy()
+                ],
+            )
+            .unwrap();
+    }
 
     fn start_daemon() -> (
         tempfile::TempDir,
@@ -1007,6 +1459,56 @@ mod tests {
 
         stop_daemon(shutdown, worker);
         assert!(!socket.exists());
+    }
+
+    #[test]
+    fn multi_chunk_response_drains_bytes_buffered_before_peer_close() {
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let payload = vec![b'x'; 4 * 1024];
+        writer.write_all(&payload).unwrap();
+        writer.write_all(b"\n").unwrap();
+        drop(writer);
+
+        let received = read_bounded(
+            &mut reader,
+            MAX_RESPONSE_BYTES,
+            LimitKind::Response,
+            Instant::now() + CLIENT_IO_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(received, payload);
+    }
+
+    #[test]
+    fn dashboard_round_trip_and_binding_are_host_owned_and_cas_guarded() {
+        let temp = tempdir().unwrap();
+        let paths = AppPaths::from_root(temp.path().join("state"));
+        let codex_home = temp.path().join("codex");
+        let snapshot_root = temp.path().join("snapshots");
+        write_dashboard_catalog(&codex_home);
+        crate::paths::secure_directory(&snapshot_root).unwrap();
+        let catalog = CodexTaskCatalog::from_paths(codex_home, snapshot_root);
+        let mut daemon = HostDaemon::open(&paths).unwrap();
+        daemon.catalog = catalog.clone();
+        daemon.observer = Some(RolloutObserver::new(catalog));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let worker = thread::spawn(move || daemon.serve_until(worker_shutdown).unwrap());
+        let socket = paths.runtime_directory.join(HEALTH_SOCKET_NAME);
+
+        let initial = query_dashboard(&socket).unwrap();
+        assert_eq!(initial.tasks.len(), 1);
+        assert!(initial.slots.iter().all(|slot| slot.task_id.is_none()));
+        let bound = bind_dashboard_slot(&socket, 1, DASHBOARD_TASK, None).unwrap();
+        assert_eq!(bound.slots[0].task_id.as_deref(), Some(DASHBOARD_TASK));
+        assert_eq!(bound.slots[0].binding_generation, Some(1));
+        assert!(matches!(
+            bind_dashboard_slot(&socket, 1, DASHBOARD_TASK, None),
+            Err(HealthError::Rejected(error)) if error == "stale_binding"
+        ));
+        assert!(query_health(&socket).is_ok());
+
+        stop_daemon(shutdown, worker);
     }
 
     #[test]

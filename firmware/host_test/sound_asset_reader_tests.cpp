@@ -668,6 +668,47 @@ void factory_waytoagi_asset_is_frozen_and_streams_without_heap() {
          SoundAssetReadResult::InvalidResource);
 }
 
+void embedded_summary_longer_than_boot_limit_is_accepted() {
+  constexpr std::uint16_t frame_count = 801U;
+  constexpr std::uint32_t decoded_samples = 384001U;
+  constexpr std::size_t full_frame_bytes = 6U + 240U;
+  std::vector<std::uint8_t> encoded(
+      20U + (800U * full_frame_bytes) + 6U, 0U);
+  encoded[0U] = 'E';
+  encoded[1U] = 'I';
+  encoded[2U] = 'A';
+  encoded[3U] = 'D';
+  encoded[4U] = 1U;
+  encoded[5U] = 1U;
+  write_le32(encoded.data() + 6U, 48000U);
+  write_le16(encoded.data() + 10U, 480U);
+  write_le16(encoded.data() + 12U, frame_count);
+  write_le32(encoded.data() + 14U, decoded_samples);
+  write_le16(encoded.data() + 18U, 20U);
+  for (std::size_t index = 0U; index < 800U; ++index) {
+    const auto offset = 20U + (index * full_frame_bytes);
+    write_le16(encoded.data() + offset, 480U);
+  }
+  write_le16(encoded.data() + 20U + (800U * full_frame_bytes), 1U);
+
+  SoundAssetStreamDecoder decoder;
+  assert(decoder.open_embedded(encoded.data(), encoded.size()) ==
+         SoundAssetReadResult::Ok);
+  std::array<std::int16_t, kSoundAssetFrameSamples> pcm{};
+  std::uint32_t streamed_samples = 0U;
+  while (true) {
+    std::size_t samples = 0U;
+    const auto result = decoder.decode_next(
+        pcm.data(), pcm.size(), &samples);
+    if (result == SoundAssetReadResult::End) {
+      break;
+    }
+    assert(result == SoundAssetReadResult::Ok);
+    streamed_samples += static_cast<std::uint32_t>(samples);
+  }
+  assert(streamed_samples == decoded_samples);
+}
+
 }  // namespace
 
 int main() {
@@ -679,5 +720,6 @@ int main() {
   corrupt_frame_isolated_to_audio_and_does_not_advance();
   resolver_and_stream_reject_foreign_identity();
   factory_waytoagi_asset_is_frozen_and_streams_without_heap();
+  embedded_summary_longer_than_boot_limit_is_accepted();
   return 0;
 }

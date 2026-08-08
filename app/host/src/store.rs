@@ -835,6 +835,46 @@ impl StateStore {
         Ok(changed == 1)
     }
 
+    pub fn abandon_interrupted_summary_for_task(
+        &mut self,
+        task_id: &str,
+    ) -> Result<Option<u64>, StoreError> {
+        if uuid::Uuid::parse_str(task_id).is_err() {
+            return Err(StoreError::InvalidSummaryRequest);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let generation: Option<i64> = transaction
+            .query_row(
+                "SELECT generation FROM summary_ledger
+                 WHERE task_id = ?1 AND state = 'interrupted'",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(generation) = generation else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let changed = transaction.execute(
+            "UPDATE summary_ledger
+             SET state = 'abandoned', claim_id = NULL, updated_at = unixepoch()
+             WHERE task_id = ?1 AND generation = ?2 AND state = 'interrupted'",
+            params![task_id, generation],
+        )?;
+        if changed != 1 {
+            transaction.rollback()?;
+            return Err(StoreError::SummaryClaimChanged);
+        }
+        transaction.execute(
+            "DELETE FROM summary_tts_attempts WHERE task_id = ?1 AND generation = ?2",
+            params![task_id, generation],
+        )?;
+        transaction.commit()?;
+        Ok(Some(generation as u64))
+    }
+
     pub fn summary_tts_attempt(
         &self,
         claim: &SummaryClaim,
@@ -3367,6 +3407,52 @@ mod tests {
             reopened.claim_summary(TASK, "request-2"),
             Err(StoreError::SummaryRequestAbandoned)
         ));
+    }
+
+    #[test]
+    fn manual_abandon_recovers_interrupted_claim_after_previous_summary_was_heard() {
+        const TASK: &str = "019fa972-5cfa-75e1-9008-0b17ade9a347";
+        const FIRST: &str = "019fa972-5cfa-75e1-9008-0b17ade9a348";
+        const SECOND: &str = "019fa972-5cfa-75e1-9008-0b17ade9a349";
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("state.sqlite3");
+        let mut store = StateStore::open(&path).unwrap();
+        insert_summary_completion(&store, TASK, FIRST, r#"{"turn":1}"#);
+        let first = claimed(store.claim_summary(TASK, "request-1").unwrap());
+        let first_cache = CacheId::for_task(TASK, 1).unwrap().reference();
+        store.publish_summary(&first, &first_cache).unwrap();
+
+        insert_summary_completion(&store, TASK, SECOND, r#"{"turn":2}"#);
+        let second = claimed(store.claim_summary(TASK, "request-2").unwrap());
+        assert_eq!(
+            store.begin_summary_tts_attempt(&second).unwrap(),
+            SummaryTtsAttemptState::Started
+        );
+        store.mark_summary_tts_ambiguous(&second).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE summary_ledger SET state = 'heard'
+                 WHERE task_id = ?1 AND generation = 1",
+                [TASK],
+            )
+            .unwrap();
+        drop(store);
+
+        let mut reopened = StateStore::open(&path).unwrap();
+        assert!(matches!(
+            reopened.resume_interrupted_summary(TASK),
+            Err(StoreError::InvalidSummaryState)
+        ));
+        assert_eq!(
+            reopened.abandon_interrupted_summary_for_task(TASK).unwrap(),
+            Some(2)
+        );
+        assert_eq!(reopened.pending_summary_completion_count(TASK).unwrap(), 1);
+        let replacement = claimed(reopened.claim_summary(TASK, "request-3").unwrap());
+        assert_eq!(replacement.generation, 3);
+        assert!(replacement.previous_unread.is_none());
+        assert_eq!(replacement.completions[0].completion_id, SECOND);
     }
 
     #[test]

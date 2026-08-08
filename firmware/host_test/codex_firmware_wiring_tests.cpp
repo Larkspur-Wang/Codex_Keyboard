@@ -105,6 +105,20 @@ void lower_row_playback_uses_authenticated_lan_psram_and_speaker_path() {
          std::string::npos);
   assert(playback.find("send_finished()") != std::string::npos);
   assert(playback.find("acknowledge_finished") != std::string::npos);
+  const auto fail_begin = playback.find("void CodexLanPlayback::fail(");
+  const auto cleanup_begin = playback.find("void CodexLanPlayback::cleanup(");
+  assert(fail_begin != std::string::npos);
+  assert(cleanup_begin != std::string::npos);
+  assert(fail_begin < cleanup_begin);
+  const auto fail_section = playback.substr(
+      fail_begin, cleanup_begin - fail_begin);
+  assert(fail_section.find("send_ack(3U)") != std::string::npos);
+  assert(fail_section.find("cleanup(false)") == std::string::npos);
+  assert(playback.find("kReceiveTimeoutMs = 30000U") !=
+         std::string::npos);
+  assert(fail_section.find("data_timeout") != std::string::npos);
+  assert(fail_section.find("failure_diagnostic_ = 22U") !=
+         std::string::npos);
 }
 
 }  // namespace

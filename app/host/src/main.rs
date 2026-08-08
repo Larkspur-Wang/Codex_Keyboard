@@ -384,15 +384,12 @@ fn abandon_slot_summary(slot: u8) -> Result<(), Box<dyn std::error::Error>> {
     paths.prepare()?;
     let mut state = StateStore::open(&paths.state_database)?;
     let binding = state.binding(slot)?.ok_or("slot is not bound")?;
-    let claim = state
-        .resume_interrupted_summary(&binding.task_id)?
+    let generation = state
+        .abandon_interrupted_summary_for_task(&binding.task_id)?
         .ok_or("slot has no interrupted summary")?;
-    if !state.abandon_summary_claim(&claim)? {
-        return Err("summary claim changed before abandonment".into());
-    }
     println!("status=abandoned");
     println!("slot={slot}");
-    println!("generation={}", claim.generation);
+    println!("generation={generation}");
     Ok(())
 }
 

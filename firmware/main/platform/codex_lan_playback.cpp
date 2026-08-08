@@ -18,7 +18,7 @@ namespace {
 
 constexpr const char* kTag = "codex_play";
 constexpr std::uint32_t kRequestRetryMs = 500U;
-constexpr std::uint32_t kReceiveTimeoutMs = 5000U;
+constexpr std::uint32_t kReceiveTimeoutMs = 30000U;
 constexpr std::uint32_t kFinishedRetryMs = 500U;
 constexpr std::uint32_t kCancelRetryMs = 100U;
 constexpr std::uint8_t kMaximumRequestRetries = 12U;
@@ -255,7 +255,9 @@ bool CodexLanPlayback::send_ack(std::uint8_t status) {
   const easy_codex::PlaybackWireAck ack{
       begin_.identity,
       status,
-      static_cast<std::uint32_t>(received_bytes_),
+      status == 3U && failure_diagnostic_ != 0U
+          ? UINT32_C(0xEC000000) | failure_diagnostic_
+          : static_cast<std::uint32_t>(received_bytes_),
   };
   if (!easy_codex::encode_playback_ack(
           ack, key_, packet.data(), packet.size())) {
@@ -460,20 +462,29 @@ void CodexLanPlayback::handle_finished_ack(
 }
 
 bool CodexLanPlayback::begin_speaker_playback() {
+  failure_diagnostic_ = 0U;
   if (!speaker_->ready()) {
     const auto result = speaker_->begin(supervisor_task_, audio_io_arbiter_);
     if (result != ESP_OK) {
+      failure_diagnostic_ = 1U;
       return false;
     }
   }
-  if (!speaker_->request_embedded_asset(encoded_, begin_.total_bytes) ||
-      !slots_->mark_playback_started(slot_identity())) {
+  if (!speaker_->request_embedded_asset(encoded_, begin_.total_bytes)) {
+    failure_diagnostic_ = static_cast<std::uint8_t>(
+        10U + static_cast<std::uint8_t>(
+                  speaker_->last_request_failure()));
+    return false;
+  }
+  if (!slots_->mark_playback_started(slot_identity())) {
+    failure_diagnostic_ = 2U;
     return false;
   }
   const auto frame_count =
       (begin_.total_bytes + begin_.chunk_bytes - 1U) / begin_.chunk_bytes;
   if (!slots_->mark_playback_transfer_complete(
           slot_identity(), frame_count - 1U)) {
+    failure_diagnostic_ = 3U;
     speaker_->poll(false);
     return false;
   }
@@ -489,16 +500,42 @@ bool CodexLanPlayback::begin_speaker_playback() {
 
 void CodexLanPlayback::fail(const char* reason) {
   last_failure_ = reason == nullptr ? "failed" : reason;
+  if (failure_diagnostic_ == 0U) {
+    if (std::strcmp(last_failure_, "socket_receive") == 0) {
+      failure_diagnostic_ = 20U;
+    } else if (std::strcmp(last_failure_, "begin_timeout") == 0) {
+      failure_diagnostic_ = 21U;
+    } else if (std::strcmp(last_failure_, "data_timeout") == 0) {
+      failure_diagnostic_ = 22U;
+    } else if (std::strcmp(last_failure_, "begin_ack") == 0) {
+      failure_diagnostic_ = 23U;
+    } else if (std::strcmp(last_failure_, "data_ack") == 0) {
+      failure_diagnostic_ = 24U;
+    } else if (std::strcmp(last_failure_, "psram_allocate") == 0) {
+      failure_diagnostic_ = 25U;
+    } else if (std::strcmp(last_failure_, "speaker_failed") == 0) {
+      failure_diagnostic_ = 26U;
+    } else if (std::strcmp(last_failure_, "finished_send") == 0) {
+      failure_diagnostic_ = 27U;
+    } else if (std::strcmp(last_failure_, "finished_timeout") == 0) {
+      failure_diagnostic_ = 28U;
+    } else {
+      failure_diagnostic_ = 29U;
+    }
+  }
   ESP_LOGW(kTag, "failed phase=%u reason=%s",
            static_cast<unsigned>(phase_), last_failure_);
   if (easy_codex::valid_playback_identity(slot_identity())) {
     slots_->abort_playback(slot_identity());
   }
   phase_ = Phase::Cancelling;
-  speaker_->poll(false);
-  if (!speaker_->busy()) {
-    cleanup(false);
+  cancel_retries_ = 0U;
+  cancel_acknowledged_ = false;
+  last_send_ms_ = millis();
+  if (easy_codex::valid_playback_identity(slot_identity()) && send_ack(3U)) {
+    ++cancel_retries_;
   }
+  speaker_->poll(false);
 }
 
 void CodexLanPlayback::cleanup(bool abort_slot) {
@@ -528,6 +565,7 @@ void CodexLanPlayback::cleanup(bool abort_slot) {
   finished_retries_ = 0U;
   cancel_retries_ = 0U;
   cancel_acknowledged_ = false;
+  failure_diagnostic_ = 0U;
   phase_ = Phase::Idle;
 }
 

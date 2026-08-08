@@ -5,6 +5,10 @@ pub const TTS_SAMPLE_RATE: u32 = 48_000;
 pub const MAX_TTS_SECONDS: u32 = 90;
 pub const EIAD_FRAME_SAMPLES: usize = 960;
 
+const DEVICE_EIAD_FRAME_SAMPLES: usize = 480;
+const DEVICE_EIAD_HEADER_BYTES: usize = 20;
+const DEVICE_EIAD_FRAME_HEADER_BYTES: usize = 6;
+
 const WAV_HEADER_BYTES: usize = 44;
 const EIAD_HEADER_BYTES: usize = 32;
 const EIAD_FRAME_HEADER_BYTES: usize = 8;
@@ -177,6 +181,14 @@ fn encode_eiad(pcm_le: &[u8]) -> Result<Vec<u8>, AudioError> {
 }
 
 fn encode_ima_frame(samples: &[i16], output: &mut Vec<u8>) -> Result<(), AudioError> {
+    encode_ima_frame_with_layout(samples, output, true)
+}
+
+fn encode_ima_frame_with_layout(
+    samples: &[i16],
+    output: &mut Vec<u8>,
+    include_payload_length: bool,
+) -> Result<(), AudioError> {
     let (&first, rest) = samples.split_first().ok_or(AudioError::InvalidPcm)?;
     let encoded_bytes = rest.len().div_ceil(2);
     let initial_step_index = rest.first().map_or(0, |second| {
@@ -194,11 +206,13 @@ fn encode_ima_frame(samples: &[i16], output: &mut Vec<u8>) -> Result<(), AudioEr
     output.extend_from_slice(&first.to_le_bytes());
     output.push(initial_step_index);
     output.push(0);
-    output.extend_from_slice(
-        &u16::try_from(encoded_bytes)
-            .map_err(|_| AudioError::Size)?
-            .to_le_bytes(),
-    );
+    if include_payload_length {
+        output.extend_from_slice(
+            &u16::try_from(encoded_bytes)
+                .map_err(|_| AudioError::Size)?
+                .to_le_bytes(),
+        );
+    }
 
     let mut predictor = i32::from(first);
     let mut step_index = i32::from(initial_step_index);
@@ -215,6 +229,106 @@ fn encode_ima_frame(samples: &[i16], output: &mut Vec<u8>) -> Result<(), AudioEr
         output.push(low);
     }
     Ok(())
+}
+
+// The encrypted cache keeps the Host EIAD container. The V2 firmware speaker
+// consumes the flash sound-bank EIAD layout (20-byte header, 480-sample frames),
+// so convert only at the authenticated LAN transport boundary.
+pub fn transcode_eiad_for_device(eiad: &[u8]) -> Result<Zeroizing<Vec<u8>>, AudioError> {
+    let pcm = decode_eiad(eiad)?;
+    let total_samples = validate_pcm(pcm.as_slice())?;
+    let total_samples_usize = usize::try_from(total_samples).map_err(|_| AudioError::Size)?;
+    let frame_count_usize = total_samples_usize.div_ceil(DEVICE_EIAD_FRAME_SAMPLES);
+    let frame_count = u16::try_from(frame_count_usize).map_err(|_| AudioError::Size)?;
+    let total_samples_u32 = u32::try_from(total_samples).map_err(|_| AudioError::Size)?;
+    let estimated =
+        DEVICE_EIAD_HEADER_BYTES
+            .checked_add(frame_count_usize.saturating_mul(
+                DEVICE_EIAD_FRAME_HEADER_BYTES + DEVICE_EIAD_FRAME_SAMPLES.div_ceil(2),
+            ))
+            .ok_or(AudioError::Size)?;
+    let mut output = Zeroizing::new(Vec::with_capacity(estimated));
+    output.extend_from_slice(b"EIAD");
+    output.push(1);
+    output.push(1);
+    output.extend_from_slice(&TTS_SAMPLE_RATE.to_le_bytes());
+    output.extend_from_slice(&(DEVICE_EIAD_FRAME_SAMPLES as u16).to_le_bytes());
+    output.extend_from_slice(&frame_count.to_le_bytes());
+    output.extend_from_slice(&total_samples_u32.to_le_bytes());
+    output.extend_from_slice(&(DEVICE_EIAD_HEADER_BYTES as u16).to_le_bytes());
+
+    let samples = Zeroizing::new(
+        pcm.chunks_exact(2)
+            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>(),
+    );
+    for frame in samples.chunks(DEVICE_EIAD_FRAME_SAMPLES) {
+        encode_ima_frame_with_layout(frame, &mut output, false)?;
+    }
+    inspect_device_eiad(output.as_slice())?;
+    Ok(output)
+}
+
+fn inspect_device_eiad(eiad: &[u8]) -> Result<EiadMetadata, AudioError> {
+    if eiad.len() < DEVICE_EIAD_HEADER_BYTES
+        || &eiad[..4] != b"EIAD"
+        || eiad[4] != 1
+        || eiad[5] != 1
+        || read_u32(eiad, 6)? != TTS_SAMPLE_RATE
+        || read_u16(eiad, 10)? != DEVICE_EIAD_FRAME_SAMPLES as u16
+        || read_u16(eiad, 18)? != DEVICE_EIAD_HEADER_BYTES as u16
+    {
+        return Err(AudioError::InvalidEiad);
+    }
+    let frames = u32::from(read_u16(eiad, 12)?);
+    let samples = u64::from(read_u32(eiad, 14)?);
+    if samples == 0
+        || samples > u64::from(TTS_SAMPLE_RATE) * u64::from(MAX_TTS_SECONDS)
+        || u64::from(frames) != samples.div_ceil(DEVICE_EIAD_FRAME_SAMPLES as u64)
+    {
+        return Err(AudioError::InvalidEiad);
+    }
+    let mut offset = DEVICE_EIAD_HEADER_BYTES;
+    let mut counted_samples = 0_u64;
+    for index in 0..frames {
+        let end = offset
+            .checked_add(DEVICE_EIAD_FRAME_HEADER_BYTES)
+            .ok_or(AudioError::InvalidEiad)?;
+        if end > eiad.len() {
+            return Err(AudioError::InvalidEiad);
+        }
+        let frame_samples = usize::from(read_u16(eiad, offset)?);
+        let expected_samples = if index + 1 == frames {
+            usize::try_from(samples - counted_samples).map_err(|_| AudioError::InvalidEiad)?
+        } else {
+            DEVICE_EIAD_FRAME_SAMPLES
+        };
+        if frame_samples != expected_samples
+            || frame_samples == 0
+            || eiad[offset + 4] > 88
+            || eiad[offset + 5] != 0
+        {
+            return Err(AudioError::InvalidEiad);
+        }
+        let payload_bytes = frame_samples.saturating_sub(1).div_ceil(2);
+        offset = end
+            .checked_add(payload_bytes)
+            .ok_or(AudioError::InvalidEiad)?;
+        if offset > eiad.len() {
+            return Err(AudioError::InvalidEiad);
+        }
+        counted_samples = counted_samples
+            .checked_add(frame_samples as u64)
+            .ok_or(AudioError::InvalidEiad)?;
+    }
+    if offset != eiad.len() || counted_samples != samples {
+        return Err(AudioError::InvalidEiad);
+    }
+    Ok(EiadMetadata {
+        sample_rate: TTS_SAMPLE_RATE,
+        samples,
+        frames,
+    })
 }
 
 fn encode_ima_sample(sample: i32, predictor: &mut i32, step_index: &mut i32) -> u8 {
@@ -255,6 +369,12 @@ pub struct EiadMetadata {
     pub sample_rate: u32,
     pub samples: u64,
     pub frames: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EiadSignal {
+    pub absolute_peak: u16,
+    pub rms_permille: u16,
 }
 
 pub fn inspect_eiad(eiad: &[u8]) -> Result<EiadMetadata, AudioError> {
@@ -356,6 +476,30 @@ pub fn decode_eiad(eiad: &[u8]) -> Result<Zeroizing<Vec<u8>>, AudioError> {
         offset += payload_bytes;
     }
     Ok(output)
+}
+
+pub fn inspect_eiad_signal(eiad: &[u8]) -> Result<EiadSignal, AudioError> {
+    let pcm = decode_eiad(eiad)?;
+    let mut peak = 0_u32;
+    let mut sum_squares = 0_u64;
+    let mut samples = 0_u64;
+    for pair in pcm.chunks_exact(2) {
+        let sample = i32::from(i16::from_le_bytes([pair[0], pair[1]]));
+        let magnitude = sample.unsigned_abs();
+        peak = peak.max(magnitude);
+        sum_squares = sum_squares.saturating_add(u64::from(magnitude) * u64::from(magnitude));
+        samples += 1;
+    }
+    if samples == 0 {
+        return Err(AudioError::InvalidEiad);
+    }
+    let rms = ((sum_squares as f64 / samples as f64).sqrt() * 1_000.0 / 32_767.0)
+        .round()
+        .clamp(0.0, 1_000.0) as u16;
+    Ok(EiadSignal {
+        absolute_peak: peak.min(i16::MAX as u32) as u16,
+        rms_permille: rms,
+    })
 }
 
 fn decode_ima_sample(code: u8, predictor: i32, step_index: &mut i32) -> i32 {
@@ -475,6 +619,39 @@ mod tests {
             maximum_error < 5_000,
             "unexpected IMA error {maximum_error}"
         );
+    }
+
+    #[test]
+    fn eiad_signal_distinguishes_silence_from_audible_pcm() {
+        let silence = encode_tts_audio(&vec![0_u8; EIAD_FRAME_SAMPLES * 2]).unwrap();
+        assert_eq!(
+            inspect_eiad_signal(silence.eiad()).unwrap(),
+            EiadSignal {
+                absolute_peak: 0,
+                rms_permille: 0,
+            }
+        );
+
+        let audible = encode_tts_audio(&pcm(EIAD_FRAME_SAMPLES)).unwrap();
+        let signal = inspect_eiad_signal(audible.eiad()).unwrap();
+        assert!(signal.absolute_peak > 20_000);
+        assert!(signal.rms_permille > 300);
+    }
+
+    #[test]
+    fn cached_eiad_transcodes_to_the_firmware_sound_bank_layout() {
+        for sample_count in [1, 479, 480, 481, 620_280] {
+            let artifacts = encode_tts_audio(&pcm(sample_count)).unwrap();
+            let device = transcode_eiad_for_device(artifacts.eiad()).unwrap();
+            let metadata = inspect_device_eiad(device.as_slice()).unwrap();
+            assert_eq!(&device[..4], b"EIAD");
+            assert_eq!(device[4], 1);
+            assert_eq!(device[5], 1);
+            assert_eq!(read_u16(device.as_slice(), 10).unwrap(), 480);
+            assert_eq!(read_u16(device.as_slice(), 18).unwrap(), 20);
+            assert_eq!(metadata.samples, sample_count as u64);
+            assert_eq!(metadata.frames, sample_count.div_ceil(480) as u32);
+        }
     }
 
     #[test]

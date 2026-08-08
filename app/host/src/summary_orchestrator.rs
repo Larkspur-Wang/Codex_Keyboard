@@ -7,7 +7,7 @@ use crate::spark_runner::{SparkError, SparkRunner};
 use crate::store::{
     StateStore, StoreError, SummaryClaim, SummaryClaimResult, SummaryTtsAttemptState, UnreadSummary,
 };
-use crate::summary::{SummaryDocument, SummaryDocumentError};
+use crate::summary::{SummaryDocument, SummaryDocumentError, contains_han_text};
 use crate::tts_cache::{
     PublishedTtsGeneration, TtsCacheError, load_tts_generation_with, load_tts_summary,
     publish_tts_generation_with,
@@ -211,7 +211,7 @@ where
         };
         observer.reached(SummaryCheckpoint::PreviousUnreadLoaded);
 
-        let summary = match self.generator.generate(&claim, previous.as_ref()) {
+        let mut summary = match self.generator.generate(&claim, previous.as_ref()) {
             Ok(summary) => summary,
             Err(error) => {
                 self.abandon(&claim)?;
@@ -226,6 +226,27 @@ where
         if let Err(error) = summary.validate_expected_covers(&expected) {
             self.abandon(&claim)?;
             return Err(error.into());
+        }
+        if !contains_han_text(&summary.spoken_text) {
+            eprintln!(
+                "summary=spoken_text_language_retry generation={}",
+                claim.generation
+            );
+            summary = match self.generator.generate(&claim, previous.as_ref()) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    self.abandon(&claim)?;
+                    return Err(error.into());
+                }
+            };
+            if let Err(error) = summary.validate_expected_covers(&expected) {
+                self.abandon(&claim)?;
+                return Err(error.into());
+            }
+            if !contains_han_text(&summary.spoken_text) {
+                self.abandon(&claim)?;
+                return Err(SummaryDocumentError::Text.into());
+            }
         }
         observer.reached(SummaryCheckpoint::SparkGenerated);
 
@@ -366,6 +387,11 @@ mod tests {
         previous_facts: Arc<Mutex<Vec<usize>>>,
     }
 
+    struct LanguageRepairGenerator {
+        calls: Arc<AtomicUsize>,
+        repair_succeeds: bool,
+    }
+
     impl SummaryGenerator for FakeGenerator {
         fn generate(
             &self,
@@ -386,7 +412,33 @@ mod tests {
                 facts,
                 pending: vec!["pending-work".into()],
                 decisions: vec!["use-transactional-publication".into()],
-                spoken_text: format!("summary generation {}", claim.generation),
+                spoken_text: format!("第 {} 代任务摘要已完成。", claim.generation),
+                covers_new_completions: claim
+                    .completions
+                    .iter()
+                    .map(|completion| completion.completion_id.clone())
+                    .collect(),
+            })
+        }
+    }
+
+    impl SummaryGenerator for LanguageRepairGenerator {
+        fn generate(
+            &self,
+            claim: &SummaryClaim,
+            _previous_unheard: Option<&SummaryDocument>,
+        ) -> Result<SummaryDocument, SparkError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(SummaryDocument {
+                schema: SUMMARY_SCHEMA_VERSION,
+                facts: vec!["任务事实".into()],
+                pending: Vec::new(),
+                decisions: Vec::new(),
+                spoken_text: if call > 0 && self.repair_succeeds {
+                    "任务已经完成，可以播放。".into()
+                } else {
+                    "The task is complete and ready to play.".into()
+                },
                 covers_new_completions: claim
                     .completions
                     .iter()
@@ -546,6 +598,55 @@ mod tests {
         assert_eq!(store.pending_summary_completion_count(TASK).unwrap(), 0);
         let summary = load_tts_summary(&cache, TASK, 2).unwrap();
         assert_eq!(summary.facts.len(), 2);
+    }
+
+    #[test]
+    fn non_chinese_spoken_text_gets_one_bounded_repair_before_tts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&temporary.path().join("state.sqlite3")).unwrap();
+        let cache = open_cache(&temporary.path().join("cache"));
+        insert_completion(&mut store, FIRST, 1);
+        let generator = LanguageRepairGenerator {
+            calls: Arc::new(AtomicUsize::new(0)),
+            repair_succeeds: true,
+        };
+        let tts = synthesizer(FakeTtsMode::Success);
+
+        let outcome = SummaryOrchestrator::new(&mut store, &cache, &generator, &tts)
+            .run(TASK, "language-repair")
+            .unwrap();
+
+        assert!(matches!(outcome, SummaryRunOutcome::Published { .. }));
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(tts.calls.load(Ordering::SeqCst), 1);
+        assert!(contains_han_text(
+            &load_tts_summary(&cache, TASK, 1).unwrap().spoken_text
+        ));
+    }
+
+    #[test]
+    fn repeated_non_chinese_spoken_text_never_reaches_tts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&temporary.path().join("state.sqlite3")).unwrap();
+        let cache = open_cache(&temporary.path().join("cache"));
+        insert_completion(&mut store, FIRST, 1);
+        let generator = LanguageRepairGenerator {
+            calls: Arc::new(AtomicUsize::new(0)),
+            repair_succeeds: false,
+        };
+        let tts = synthesizer(FakeTtsMode::Success);
+
+        let error = SummaryOrchestrator::new(&mut store, &cache, &generator, &tts)
+            .run(TASK, "language-reject")
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SummaryOrchestratorError::Summary(SummaryDocumentError::Text)
+        ));
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(tts.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.pending_summary_completion_count(TASK).unwrap(), 1);
     }
 
     #[test]

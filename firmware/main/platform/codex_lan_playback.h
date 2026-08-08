@@ -78,6 +78,7 @@ class CodexLanPlayback {
   std::uint8_t finished_retries_ = 0U;
   std::uint8_t cancel_retries_ = 0U;
   bool cancel_acknowledged_ = false;
+  std::uint8_t failure_diagnostic_ = 0U;
   const char* last_failure_ = "none";
   std::uint8_t deferred_slot_ = 0U;
   std::uint32_t deferred_request_generation_ = 0U;

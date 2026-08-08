@@ -12,10 +12,10 @@
       {
         "label": "main",
         "title": "Codex Keyboard",
-        "width": 680,
-        "height": 460,
-        "minWidth": 560,
-        "minHeight": 420,
+        "width": 760,
+        "height": 800,
+        "minWidth": 660,
+        "minHeight": 700,
         "resizable": true,
         "fullscreen": false
       }

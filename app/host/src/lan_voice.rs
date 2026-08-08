@@ -45,6 +45,7 @@ const MAX_TRANSCRIPT_BYTES: usize = 32 * 1024;
 const PLAYBACK_RETRY: Duration = Duration::from_millis(250);
 const PLAYBACK_MAX_RETRIES: u8 = 16;
 const PLAYBACK_FINISH_TIMEOUT: Duration = Duration::from_secs(150);
+const PLAYBACK_SEND_WINDOW_CHUNKS: usize = 4;
 const PLAYBACK_FINISHED_ACK_RETENTION: Duration = Duration::from_secs(120);
 const DEFAULT_MODEL_SHA1: &str = "a3733eda680ef76256db5fc5dd9de8629e62c5e7";
 const MIN_MODEL_BYTES: u64 = 1024 * 1024;
@@ -523,6 +524,10 @@ impl ActiveLanPlayback {
                     retry_count: 0,
                     finish_deadline: Instant::now() + PLAYBACK_FINISH_TIMEOUT,
                 });
+                eprintln!(
+                    "lan_playback=begin_sent slot={} generation={}",
+                    start.begin.identity.slot, start.begin.identity.summary_generation
+                );
             }
             LanPlaybackCommand::FinishAck(identity) => {
                 let exact = self.transfer.as_ref().is_some_and(|transfer| {
@@ -565,18 +570,24 @@ impl ActiveLanPlayback {
         events: &mpsc::Sender<LanPlaybackEvent>,
     ) {
         if packet.starts_with(b"EIPR") {
-            if let Ok(request) = decode_request(packet, key) {
-                if !self.accept_request_generation(request) {
+            let request = match decode_request(packet, key) {
+                Ok(request) => request,
+                Err(_) => {
+                    eprintln!("lan_playback=request_invalid reason=authentication_or_format");
                     return;
                 }
-                if let Some(transfer) = self.transfer.take() {
-                    let _ = events.send(LanPlaybackEvent::Cancelled(transfer.begin.identity));
-                }
-                let _ = events.send(LanPlaybackEvent::Request(LanPlaybackRequest {
-                    request,
-                    source,
-                }));
+            };
+            if !self.accept_request_generation(request) {
+                eprintln!("lan_playback=request_replayed slot={}", request.slot);
+                return;
             }
+            if let Some(transfer) = self.transfer.take() {
+                let _ = events.send(LanPlaybackEvent::Cancelled(transfer.begin.identity));
+            }
+            let _ = events.send(LanPlaybackEvent::Request(LanPlaybackRequest {
+                request,
+                source,
+            }));
             return;
         }
         if packet.starts_with(b"EIPA") {
@@ -614,6 +625,10 @@ impl ActiveLanPlayback {
             if transfer.phase == PlaybackSendPhase::DeviceFinished {
                 transfer.phase = PlaybackSendPhase::HostCommit;
                 transfer.finish_deadline = Instant::now() + PLAYBACK_FINISH_TIMEOUT;
+                eprintln!(
+                    "lan_playback=device_finished slot={} generation={}",
+                    finished.identity.slot, finished.identity.summary_generation
+                );
                 let _ = events.send(LanPlaybackEvent::Finished(finished));
             } else {
                 let _ = events.send(LanPlaybackEvent::Finished(finished));
@@ -659,8 +674,48 @@ impl ActiveLanPlayback {
         if transfer.source != source || transfer.begin.identity != ack.identity {
             return;
         }
+        if ack.status == 1
+            && transfer.phase == PlaybackSendPhase::DataAck
+            && ack.next_offset as usize >= transfer.acknowledged_offset
+            && ack.next_offset as usize <= transfer.sent_end_offset
+        {
+            let requested_offset = ack.next_offset as usize;
+            if requested_offset == transfer.acknowledged_offset {
+                if transfer.retry_count >= PLAYBACK_MAX_RETRIES {
+                    let identity = transfer.begin.identity;
+                    eprintln!(
+                        "lan_playback=gap_retry_exhausted slot={} generation={} offset={}",
+                        identity.slot, identity.summary_generation, requested_offset
+                    );
+                    self.transfer = None;
+                    let _ = events.send(LanPlaybackEvent::Cancelled(identity));
+                    return;
+                }
+                transfer.retry_count += 1;
+            } else {
+                transfer.acknowledged_offset = requested_offset;
+                transfer.retry_count = 0;
+            }
+            if !Self::send_next_data(transfer, key, socket) {
+                let identity = transfer.begin.identity;
+                self.transfer = None;
+                let _ = events.send(LanPlaybackEvent::Cancelled(identity));
+            }
+            return;
+        }
         if ack.status != 0 {
             let identity = transfer.begin.identity;
+            eprintln!(
+                "lan_playback=device_rejected slot={} generation={} status={} diagnostic={}",
+                identity.slot,
+                identity.summary_generation,
+                ack.status,
+                if ack.next_offset & 0xFF00_0000 == 0xEC00_0000 {
+                    ack.next_offset & 0xFF
+                } else {
+                    0
+                }
+            );
             if ack.status == 3 {
                 let packet = encode_finished_ack(identity, 1, key);
                 let _ = socket.send_to(&packet, source);
@@ -676,6 +731,10 @@ impl ActiveLanPlayback {
         }
         match transfer.phase {
             PlaybackSendPhase::BeginAck if ack.next_offset == 0 => {
+                eprintln!(
+                    "lan_playback=begin_ack slot={} generation={}",
+                    ack.identity.slot, ack.identity.summary_generation
+                );
                 transfer.acknowledged_offset = 0;
                 transfer.retry_count = 0;
                 if !Self::send_next_data(transfer, key, socket) {
@@ -684,10 +743,22 @@ impl ActiveLanPlayback {
                     let _ = events.send(LanPlaybackEvent::Cancelled(identity));
                 }
             }
-            PlaybackSendPhase::DataAck if ack.next_offset as usize == transfer.sent_end_offset => {
-                transfer.acknowledged_offset = transfer.sent_end_offset;
+            PlaybackSendPhase::DataAck
+                if ack.next_offset as usize > transfer.acknowledged_offset
+                    && ack.next_offset as usize <= transfer.sent_end_offset =>
+            {
+                transfer.acknowledged_offset = ack.next_offset as usize;
                 transfer.retry_count = 0;
+                if transfer.acknowledged_offset != transfer.sent_end_offset {
+                    return;
+                }
                 if transfer.acknowledged_offset == transfer.eiad.len() {
+                    eprintln!(
+                        "lan_playback=transfer_complete slot={} generation={} bytes={}",
+                        ack.identity.slot,
+                        ack.identity.summary_generation,
+                        transfer.acknowledged_offset
+                    );
                     transfer.phase = PlaybackSendPhase::DeviceFinished;
                     transfer.finish_deadline = Instant::now() + PLAYBACK_FINISH_TIMEOUT;
                 } else if !Self::send_next_data(transfer, key, socket) {
@@ -706,18 +777,25 @@ impl ActiveLanPlayback {
         socket: &UdpSocket,
     ) -> bool {
         let start = transfer.acknowledged_offset;
-        let end = (start + PLAYBACK_CHUNK_BYTES).min(transfer.eiad.len());
-        let Ok(packet) = encode_data(
-            transfer.begin.identity,
-            transfer.begin.request_nonce,
-            start as u32,
-            &transfer.eiad[start..end],
-            key,
-        ) else {
-            return false;
-        };
-        if socket.send_to(&packet, transfer.source).is_err() {
-            return false;
+        let end = start
+            .saturating_add(PLAYBACK_CHUNK_BYTES * PLAYBACK_SEND_WINDOW_CHUNKS)
+            .min(transfer.eiad.len());
+        let mut offset = start;
+        while offset < end {
+            let chunk_end = (offset + PLAYBACK_CHUNK_BYTES).min(end);
+            let Ok(packet) = encode_data(
+                transfer.begin.identity,
+                transfer.begin.request_nonce,
+                offset as u32,
+                &transfer.eiad[offset..chunk_end],
+                key,
+            ) else {
+                return false;
+            };
+            if socket.send_to(&packet, transfer.source).is_err() {
+                return false;
+            }
+            offset = chunk_end;
         }
         transfer.sent_end_offset = end;
         transfer.phase = PlaybackSendPhase::DataAck;
@@ -753,6 +831,10 @@ impl ActiveLanPlayback {
         ) {
             if now >= transfer.finish_deadline {
                 let identity = transfer.begin.identity;
+                eprintln!(
+                    "lan_playback=device_finish_timeout slot={} generation={}",
+                    identity.slot, identity.summary_generation
+                );
                 self.transfer = None;
                 let _ = events.send(LanPlaybackEvent::Cancelled(identity));
             }
@@ -763,6 +845,10 @@ impl ActiveLanPlayback {
         }
         if transfer.retry_count >= PLAYBACK_MAX_RETRIES {
             let identity = transfer.begin.identity;
+            eprintln!(
+                "lan_playback=transport_timeout slot={} generation={} phase={:?}",
+                identity.slot, identity.summary_generation, transfer.phase
+            );
             self.transfer = None;
             let _ = events.send(LanPlaybackEvent::Cancelled(identity));
             return;
@@ -770,24 +856,35 @@ impl ActiveLanPlayback {
         let Some(key) = key else {
             return;
         };
-        let packet = match transfer.phase {
-            PlaybackSendPhase::BeginAck => encode_begin(transfer.begin, key),
+        let sent = match transfer.phase {
+            PlaybackSendPhase::BeginAck => socket
+                .send_to(&encode_begin(transfer.begin, key), transfer.source)
+                .is_ok(),
             PlaybackSendPhase::DataAck => {
-                let start = transfer.acknowledged_offset;
-                match encode_data(
-                    transfer.begin.identity,
-                    transfer.begin.request_nonce,
-                    start as u32,
-                    &transfer.eiad[start..transfer.sent_end_offset],
-                    key,
-                ) {
-                    Ok(packet) => packet,
-                    Err(_) => return,
+                let mut offset = transfer.acknowledged_offset;
+                let mut sent = true;
+                while offset < transfer.sent_end_offset {
+                    let end = (offset + PLAYBACK_CHUNK_BYTES).min(transfer.sent_end_offset);
+                    let Ok(packet) = encode_data(
+                        transfer.begin.identity,
+                        transfer.begin.request_nonce,
+                        offset as u32,
+                        &transfer.eiad[offset..end],
+                        key,
+                    ) else {
+                        return;
+                    };
+                    if socket.send_to(&packet, transfer.source).is_err() {
+                        sent = false;
+                        break;
+                    }
+                    offset = end;
                 }
+                sent
             }
             _ => return,
         };
-        if socket.send_to(&packet, transfer.source).is_ok() {
+        if sent {
             transfer.retry_count += 1;
             transfer.last_send = now;
         }
@@ -1954,24 +2051,6 @@ mod tests {
         assert_eq!(first_offset, 0);
         assert_eq!(first_payload, &eiad[..PLAYBACK_CHUNK_BYTES]);
         let first_payload = first_payload.to_vec();
-
-        playback.transfer.as_mut().unwrap().last_send = Instant::now() - PLAYBACK_RETRY;
-        playback.tick(&host, Some(&TEST_AUTH_KEY), &events);
-        let (retry_length, _) = device.recv_from(&mut packet).unwrap();
-        let (_, retry_offset, retry_payload) =
-            decode_data(&packet[..retry_length], begin.request_nonce, &TEST_AUTH_KEY).unwrap();
-        assert_eq!(retry_offset, first_offset);
-        assert_eq!(retry_payload, first_payload.as_slice());
-
-        let first_ack = encode_ack(
-            PlaybackAck {
-                identity,
-                status: 0,
-                next_offset: PLAYBACK_CHUNK_BYTES as u32,
-            },
-            &TEST_AUTH_KEY,
-        );
-        playback.ingest(&first_ack, device_address, &TEST_AUTH_KEY, &host, &events);
         let (second_length, _) = device.recv_from(&mut packet).unwrap();
         let (_, second_offset, second_payload) = decode_data(
             &packet[..second_length],
@@ -1982,6 +2061,33 @@ mod tests {
         assert_eq!(second_offset, PLAYBACK_CHUNK_BYTES as u32);
         assert_eq!(second_payload, &eiad[PLAYBACK_CHUNK_BYTES..]);
         let second_payload = second_payload.to_vec();
+
+        playback.transfer.as_mut().unwrap().last_send = Instant::now() - PLAYBACK_RETRY;
+        playback.tick(&host, Some(&TEST_AUTH_KEY), &events);
+        let (retry_length, _) = device.recv_from(&mut packet).unwrap();
+        let (_, retry_offset, retry_payload) =
+            decode_data(&packet[..retry_length], begin.request_nonce, &TEST_AUTH_KEY).unwrap();
+        assert_eq!(retry_offset, first_offset);
+        assert_eq!(retry_payload, first_payload.as_slice());
+        let (second_retry_length, _) = device.recv_from(&mut packet).unwrap();
+        let (_, second_retry_offset, second_retry_payload) = decode_data(
+            &packet[..second_retry_length],
+            begin.request_nonce,
+            &TEST_AUTH_KEY,
+        )
+        .unwrap();
+        assert_eq!(second_retry_offset, second_offset);
+        assert_eq!(second_retry_payload, second_payload.as_slice());
+
+        let first_ack = encode_ack(
+            PlaybackAck {
+                identity,
+                status: 0,
+                next_offset: PLAYBACK_CHUNK_BYTES as u32,
+            },
+            &TEST_AUTH_KEY,
+        );
+        playback.ingest(&first_ack, device_address, &TEST_AUTH_KEY, &host, &events);
 
         // The device accepted the final chunk and started playing, but its ACK
         // was lost. The Host must retransmit that exact chunk and accept the
@@ -2065,5 +2171,100 @@ mod tests {
             (identity, 0)
         );
         assert!(playback.transfer.is_none());
+    }
+
+    #[test]
+    fn playback_four_chunk_window_bounds_duplicate_gap_ack_retries() {
+        let host = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let device = UdpSocket::bind("127.0.0.1:0").unwrap();
+        device
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let device_address = device.local_addr().unwrap();
+        let identity = PlaybackIdentity {
+            slot: 2,
+            request_generation: 11,
+            connection_generation: 12,
+            summary_generation: 13,
+            lease: 14,
+        };
+        let eiad = vec![0x5A; PLAYBACK_CHUNK_BYTES * 5];
+        let begin = PlaybackBegin {
+            identity,
+            total_bytes: eiad.len() as u32,
+            total_samples: 4800,
+            chunk_bytes: PLAYBACK_CHUNK_BYTES as u16,
+            request_nonce: 15,
+        };
+        let (events, event_receiver) = mpsc::channel();
+        let mut playback = ActiveLanPlayback::default();
+        playback.handle_command(
+            LanPlaybackCommand::Start(LanPlaybackStart {
+                begin,
+                source: device_address,
+                eiad: zeroize::Zeroizing::new(eiad),
+            }),
+            &host,
+            Some(&TEST_AUTH_KEY),
+            &events,
+        );
+
+        let mut packet = [0_u8; 1200];
+        let _ = device.recv_from(&mut packet).unwrap();
+        playback.ingest(
+            &encode_ack(
+                PlaybackAck {
+                    identity,
+                    status: 0,
+                    next_offset: 0,
+                },
+                &TEST_AUTH_KEY,
+            ),
+            device_address,
+            &TEST_AUTH_KEY,
+            &host,
+            &events,
+        );
+        for expected_offset in
+            (0..PLAYBACK_SEND_WINDOW_CHUNKS).map(|index| index * PLAYBACK_CHUNK_BYTES)
+        {
+            let (length, _) = device.recv_from(&mut packet).unwrap();
+            let (_, offset, _) =
+                decode_data(&packet[..length], begin.request_nonce, &TEST_AUTH_KEY).unwrap();
+            assert_eq!(offset as usize, expected_offset);
+        }
+
+        playback.transfer.as_mut().unwrap().retry_count = PLAYBACK_MAX_RETRIES - 1;
+        let duplicate_gap = encode_ack(
+            PlaybackAck {
+                identity,
+                status: 1,
+                next_offset: 0,
+            },
+            &TEST_AUTH_KEY,
+        );
+        playback.ingest(
+            &duplicate_gap,
+            device_address,
+            &TEST_AUTH_KEY,
+            &host,
+            &events,
+        );
+        assert_eq!(
+            playback.transfer.as_ref().unwrap().retry_count,
+            PLAYBACK_MAX_RETRIES
+        );
+        playback.ingest(
+            &duplicate_gap,
+            device_address,
+            &TEST_AUTH_KEY,
+            &host,
+            &events,
+        );
+        assert!(playback.transfer.is_none());
+        assert_eq!(
+            event_receiver.try_recv().unwrap(),
+            LanPlaybackEvent::Cancelled(identity)
+        );
     }
 }

@@ -613,7 +613,7 @@ fn build_prompt(
     claim: &SummaryClaim,
     previous_unheard: Option<&SummaryDocument>,
 ) -> Result<Zeroizing<Vec<u8>>, SparkError> {
-    const INSTRUCTIONS: &[u8] = b"Create the cumulative unread task summary from the JSON input below. Preserve useful prior facts when previous_unheard is present; incorporate every new completion exactly once; separate facts, pending work, and decisions; make spoken_text concise and natural for speech. Return only the output-schema JSON. covers_new_completions must exactly equal the ordered completion_id values in new_completions. Never emit credentials, hidden reasoning, or local absolute paths.\n";
+    const INSTRUCTIONS: &[u8] = b"Create the cumulative unread task summary from the JSON input below. Preserve useful prior facts when previous_unheard is present; incorporate every new completion exactly once; separate facts, pending work, and decisions. Write facts, pending, decisions, and especially spoken_text in natural Simplified Chinese, translating English source material when needed; keep spoken_text concise and suitable for speech. Return only the output-schema JSON. covers_new_completions must exactly equal the ordered completion_id values in new_completions. Never emit credentials, hidden reasoning, or local absolute paths.\n";
     let mut prompt = BoundedSensitiveWriter::new(MAX_PROMPT_BYTES);
     prompt
         .write_all(INSTRUCTIONS)
@@ -2389,6 +2389,15 @@ mod tests {
             spoken_text: "old spoken summary".into(),
             covers_new_completions: vec!["019fa972-5cfa-75e1-9008-0b17ade9a346".into()],
         }
+    }
+
+    #[test]
+    fn summary_prompt_requires_simplified_chinese_spoken_text() {
+        let prompt = build_prompt(&claim(), None).unwrap();
+        let prompt = std::str::from_utf8(prompt.as_slice()).unwrap();
+        assert!(prompt.contains("natural Simplified Chinese"));
+        assert!(prompt.contains("translating English source material"));
+        assert!(prompt.contains("especially spoken_text"));
     }
 
     fn auth(directory: &Path) -> PathBuf {

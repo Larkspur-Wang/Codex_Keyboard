@@ -11,12 +11,14 @@
 
 ## L1 当前固件候选 HIL
 
-- [ ] 锁定 ESP-IDF v5.5.5 重新构建并记录 bootloader/partition/app SHA-256。
-- [ ] 用户针对精确 SHA 授权后进入 ROM download mode 并烧录。
-- [ ] 验证同 Wi-Fi S6 播放保留的槽 2 未读音频。
-- [ ] 验证完整播放后 exact heard/cache deletion；中断播放必须保留。
+- [x] 锁定 ESP-IDF v5.5.5 重新构建并记录 bootloader/partition/app SHA-256。
+- [x] 用户针对精确 SHA 授权后进入 ROM download mode 并烧录。
+- [x] Desktop 增加四槽任务列表、当前绑定和绑定操作；写入必须经常驻 Host IPC，不能直接争用 SQLite。
+- [x] Desktop 明示 DashScope 北京区 ASR/TTS 就绪状态，模型固定为 `qwen3-asr-flash` / `qwen3-tts-instruct-flash-realtime`。
+- [x] 验证同 Wi-Fi S6 播放保留的槽 2 未读音频。
+- [x] 验证完整播放后 exact heard/cache deletion；中断播放必须保留。
 - [ ] 验证播放中按 S2，PTT 立即优先且不会误消费音频。
-- [ ] 记录固件日志、Host lease、播放完成和缓存收敛的脱敏证据。
+- [x] 记录固件日志、Host lease、播放完成和缓存收敛的脱敏证据。
 
 ## L2 四槽本地产品收敛
 

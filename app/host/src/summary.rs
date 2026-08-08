@@ -124,6 +124,15 @@ fn valid_text(value: &str, max_bytes: usize) -> bool {
     !value.trim().is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
 }
 
+pub(crate) fn contains_han_text(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +194,14 @@ mod tests {
             SummaryDocument::parse(&vec![b'x'; MAX_SUMMARY_DOCUMENT_BYTES + 1]),
             Err(SummaryDocumentError::Size)
         );
+    }
+
+    #[test]
+    fn detects_han_text_without_treating_ascii_as_chinese() {
+        assert!(contains_han_text("任务已经完成，准备播放。"));
+        assert!(contains_han_text("ASR 与 TTS ready"));
+        assert!(!contains_han_text(
+            "The task is complete and ready to play."
+        ));
     }
 }

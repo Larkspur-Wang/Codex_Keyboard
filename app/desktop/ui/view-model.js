@@ -25,6 +25,38 @@
  *   socket: string,
  *   schema: string
  * }} HostView
+ *
+ * @typedef {{
+ *   task_id: string,
+ *   name: string,
+ *   project: string,
+ *   updated_at_ms: number,
+ *   pinned: boolean
+ * }} DashboardTask
+ *
+ * @typedef {{
+ *   slot: number,
+ *   task_id: string | null,
+ *   task_name: string | null,
+ *   project: string | null,
+ *   binding_generation: number | null,
+ *   pending_jobs: number,
+ *   unread_generation: number | null,
+ *   unread_coverage: number | null
+ * }} DashboardSlot
+ *
+ * @typedef {{
+ *   v: number,
+ *   tasks: DashboardTask[],
+ *   slots: DashboardSlot[],
+ *   provider: {
+ *     configured: boolean,
+ *     region: string,
+ *     asr_model: string,
+ *     tts_model: string,
+ *     voice: string
+ *   }
+ * }} DashboardSnapshot
  */
 
 /** @param {HostProbe} probe @returns {HostView} */
@@ -62,4 +94,30 @@ export function presentProbe(probe) {
     socket: "run/host.sock · 拒绝",
     schema: "--",
   };
+}
+
+/** @param {DashboardSlot} slot @returns {string} */
+export function presentSlotStatus(slot) {
+  const facts = [];
+  if (slot.pending_jobs > 0) {
+    facts.push(`队列 ${slot.pending_jobs}`);
+  }
+  if (slot.unread_generation !== null) {
+    const coverage = slot.unread_coverage ?? 1;
+    facts.push(`待听总结 ${coverage} 次`);
+  }
+  if (facts.length > 0) {
+    return facts.join(" · ");
+  }
+  return slot.task_id ? "已绑定" : "未绑定";
+}
+
+/** @param {DashboardTask[]} tasks @returns {DashboardTask[]} */
+export function sortedTasks(tasks) {
+  return [...tasks].sort(
+    (left, right) =>
+      Number(right.pinned) - Number(left.pinned) ||
+      right.updated_at_ms - left.updated_at_ms ||
+      left.name.localeCompare(right.name, "zh-CN"),
+  );
 }

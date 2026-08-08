@@ -12,7 +12,7 @@
     <main class="shell">
       <header class="titlebar">
         <div>
-          <p class="eyebrow">MAC HOST</p>
+          <p class="eyebrow">LOCAL WI-FI</p>
           <h1>Codex Keyboard</h1>
         </div>
         <button
@@ -45,22 +45,50 @@
         </div>
       </section>
 
+      <section class="binding-section" aria-labelledby="binding-title">
+        <div class="section-heading">
+          <h2 id="binding-title">四槽绑定</h2>
+          <span id="task-count" class="task-count">-- 个任务</span>
+        </div>
+        <div id="slots" class="slots" aria-live="polite"></div>
+      </section>
+
+      <section class="provider-band" aria-labelledby="provider-title">
+        <div class="provider-heading">
+          <span id="provider-dot" class="provider-dot"></span>
+          <h2 id="provider-title">DashScope</h2>
+          <span id="provider-state">检测中</span>
+        </div>
+        <dl class="provider-facts">
+          <div>
+            <dt>ASR</dt>
+            <dd id="asr-model">--</dd>
+          </div>
+          <div>
+            <dt>TTS</dt>
+            <dd id="tts-model">--</dd>
+          </div>
+          <div>
+            <dt>音色</dt>
+            <dd id="tts-voice">--</dd>
+          </div>
+        </dl>
+      </section>
+
       <dl class="facts">
         <div class="fact-row">
-          <dt>Host 版本</dt>
-          <dd id="host-version">--</dd>
+          <dt>Host</dt>
+          <dd>
+            <span id="host-version">--</span> · PID
+            <span id="host-pid">--</span>
+          </dd>
         </div>
         <div class="fact-row">
-          <dt>进程</dt>
-          <dd id="host-pid">--</dd>
-        </div>
-        <div class="fact-row">
-          <dt>Health socket</dt>
-          <dd id="host-socket">run/host.sock</dd>
-        </div>
-        <div class="fact-row">
-          <dt>数据库 migration</dt>
-          <dd id="database-schema">--</dd>
+          <dt>本地状态</dt>
+          <dd>
+            <span id="host-socket">run/host.sock</span> · DB
+            <span id="database-schema">--</span>
+          </dd>
         </div>
       </dl>
 
@@ -69,5 +97,40 @@
         <span>关闭窗口不会停止 Host</span>
       </footer>
     </main>
+
+    <template id="slot-template">
+      <div class="slot-row">
+        <div class="key-pair" aria-hidden="true">
+          <kbd class="talk-key"></kbd>
+          <kbd class="play-key"></kbd>
+        </div>
+        <div class="slot-content">
+          <label class="slot-label"></label>
+          <select class="task-select" aria-label=""></select>
+          <p class="slot-meta"></p>
+        </div>
+        <button
+          class="bind-button icon-button"
+          type="button"
+          aria-label=""
+          title="绑定"
+        >
+          <svg
+            aria-hidden="true"
+            data-icon-source="lucide:link"
+            viewBox="0 0 24 24"
+            width="17"
+            height="17"
+          >
+            <path
+              d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"
+            />
+            <path
+              d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+            />
+          </svg>
+        </button>
+      </div>
+    </template>
   </body>
 </html>
