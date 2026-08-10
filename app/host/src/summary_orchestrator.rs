@@ -18,8 +18,8 @@ use crate::tts_cache::{
     publish_tts_generation_with,
 };
 
-pub const SUMMARY_TTS_VOICE: &str = "Cherry";
-pub const SUMMARY_TTS_INSTRUCTIONS: &str = "请用自然、清晰的普通话女声，像熟悉工作的同事当面简洁汇报。整体语速中等偏快，句间只做短停顿；最新结果要清楚突出，待办和决定前稍作停顿。语气平实、有温度，不要播音腔、客服腔、广告腔、夸张情绪或撒娇；英文技术词、数字和缩写按自然语境读，不朗读标点和格式符号。";
+pub const SUMMARY_TTS_VOICE: &str = "longanfengyue";
+pub const SUMMARY_TTS_INSTRUCTIONS: &str = "请用自然、清晰、克制的普通话女声，像熟悉工作的同事当面简洁汇报。整体语速中等，句间只做必要的短停顿；最新结果、数字、限制和待办要清楚。语气平实、有温度，不要播音腔、客服腔、广告腔、夸张情绪或撒娇；英文技术词、数字和缩写按自然语境读，不朗读标点和格式符号。";
 
 pub trait SummaryGenerator {
     fn generate(
@@ -57,7 +57,7 @@ impl<S: SecretStore> SummarySynthesizer for DashScopeSummarySynthesizer<'_, S> {
         voice: &str,
         instructions: &str,
     ) -> Result<TtsAudio, TtsError> {
-        self.client.synthesize_chunked(
+        self.client.synthesize(
             self.secrets,
             self.accounts,
             TtsRequest {
@@ -465,10 +465,10 @@ mod tests {
 
     #[test]
     fn summary_tts_instructions_request_natural_concise_delivery() {
-        assert_eq!(SUMMARY_TTS_VOICE, "Cherry");
+        assert_eq!(SUMMARY_TTS_VOICE, "longanfengyue");
         assert!(SUMMARY_TTS_INSTRUCTIONS.contains("熟悉工作的同事"));
-        assert!(SUMMARY_TTS_INSTRUCTIONS.contains("中等偏快"));
-        assert!(SUMMARY_TTS_INSTRUCTIONS.contains("句间只做短停顿"));
+        assert!(SUMMARY_TTS_INSTRUCTIONS.contains("整体语速中等"));
+        assert!(SUMMARY_TTS_INSTRUCTIONS.contains("必要的短停顿"));
         assert!(SUMMARY_TTS_INSTRUCTIONS.contains("不要播音腔、客服腔"));
         assert!(SUMMARY_TTS_INSTRUCTIONS.contains("不朗读标点和格式符号"));
     }

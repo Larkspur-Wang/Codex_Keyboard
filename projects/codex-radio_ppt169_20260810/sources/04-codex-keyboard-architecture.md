@@ -25,8 +25,8 @@ flowchart TB
     end
 
     ASR["DashScope qwen3-asr-flash"]
-    SPARK["gpt-5.3-codex-spark"]
-    TTS["DashScope qwen3-tts-instruct-flash-realtime"]
+    SPARK["gpt-5.6-luna / high"]
+    TTS["DashScope qwen-audio-3.0-tts-flash"]
 
     ESP <-->|"same LAN: EICC/EIAU/EIP"| HOST
     HOST --> ASR
@@ -70,8 +70,9 @@ sequenceDiagram
     C->>H: authoritative task_complete
     H->>S: previous unread + new bounded turn pack
     S-->>H: cumulative spoken summary
-    H->>T: Beijing realtime TTS
-    T-->>H: PCM deltas + authoritative done
+    H->>T: one complete spoken_text request
+    T-->>H: temporary complete WAV URL
+    H->>T: HTTPS GET complete 48 kHz WAV
     H->>D: fsync and atomic WAV/EIAD generation publish
     K->>H: EIPR(slot, request generation, nonce)
     H->>D: acquire exact unread lease

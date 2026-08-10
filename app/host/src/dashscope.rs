@@ -15,28 +15,36 @@ use thiserror::Error;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::audio::{MAX_TTS_SECONDS, TTS_SAMPLE_RATE};
+use crate::audio::{MAX_TTS_SECONDS, TTS_SAMPLE_RATE, decode_wav};
 use crate::secrets::{
     CredentialVerifier, KeychainAccounts, SecretBytes, SecretStore, SecretStoreError,
     VerificationError, VerificationReceipt, dashscope_key_is_installed,
 };
 
-pub const BEIJING_REALTIME_ENDPOINT: &str =
+pub const BEIJING_VERIFICATION_ENDPOINT: &str =
     "wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen3-tts-instruct-flash-realtime";
-pub const TTS_MODEL: &str = "qwen3-tts-instruct-flash-realtime";
-pub const TTS_MODEL_SNAPSHOT: &str = "qwen3-tts-instruct-flash-realtime-2026-01-22";
+pub const DASHSCOPE_VERIFICATION_MODEL: &str = "qwen3-tts-instruct-flash-realtime";
+pub const DASHSCOPE_VERIFICATION_MODEL_SNAPSHOT: &str =
+    "qwen3-tts-instruct-flash-realtime-2026-01-22";
+pub const TTS_MODEL: &str = "qwen-audio-3.0-tts-flash";
+pub const LEGACY_TTS_MODEL: &str = "qwen3-tts-instruct-flash-realtime";
+pub const LEGACY_TTS_MODEL_SNAPSHOT: &str = "qwen3-tts-instruct-flash-realtime-2026-01-22";
 pub const ASR_MODEL: &str = "qwen3-asr-flash";
 pub const ASR_MODEL_SNAPSHOT: &str = "qwen3-asr-flash-2026-02-10";
 const HOST: &str = "dashscope.aliyuncs.com";
 const PORT: u16 = 443;
 const REQUEST_TARGET: &str = "/api-ws/v1/realtime?model=qwen3-tts-instruct-flash-realtime";
+const TTS_REQUEST_TARGET: &str = "/api/v1/services/audio/tts/SpeechSynthesizer";
 const ASR_REQUEST_TARGET: &str = "/compatible-mode/v1/chat/completions";
+const TTS_AUDIO_HOST: &str = "dashscope-result-bj.oss-cn-beijing.aliyuncs.com";
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const MAX_PROXY_HEADER_BYTES: usize = 8 * 1024;
 const MAX_SERVER_EVENT_BYTES: usize = 64 * 1024;
 const MAX_TTS_TEXT_BYTES: usize = 64 * 1024;
 const MAX_TTS_INSTRUCTIONS_BYTES: usize = 16 * 1024;
 const MAX_TTS_PCM_BYTES: usize = TTS_SAMPLE_RATE as usize * MAX_TTS_SECONDS as usize * 2;
+const MAX_TTS_WAV_BYTES: usize = MAX_TTS_PCM_BYTES + 44;
+const MAX_TTS_RESPONSE_BYTES: usize = 128 * 1024;
 const MAX_TTS_ATTEMPTS: u8 = 3;
 const MAX_TTS_CHUNK_CHARS: usize = 40;
 const MAX_TTS_SERVER_EVENTS: usize = 32_768;
@@ -69,11 +77,19 @@ struct HandshakeTarget {
 }
 
 impl HandshakeTarget {
-    fn production() -> Self {
+    fn verification() -> Self {
         Self {
             host: HOST.to_owned(),
             port: PORT,
             request_target: REQUEST_TARGET.to_owned(),
+        }
+    }
+
+    fn tts() -> Self {
+        Self {
+            host: HOST.to_owned(),
+            port: PORT,
+            request_target: TTS_REQUEST_TARGET.to_owned(),
         }
     }
 }
@@ -478,7 +494,7 @@ pub enum TtsError {
     Unavailable,
     #[error("TTS submission may have been accepted; automatic retry is unsafe")]
     AmbiguousAfterCommit,
-    #[error("DashScope returned an invalid or out-of-order realtime event")]
+    #[error("DashScope returned an invalid TTS response")]
     Protocol,
     #[error("DashScope audio exceeded the configured duration limit")]
     AudioLimit,
@@ -490,6 +506,8 @@ pub struct DashScopeTtsClient {
     retry_backoff: Duration,
     #[cfg(test)]
     test_platform: Option<TestPlatform>,
+    #[cfg(test)]
+    test_audio_target: Option<HandshakeTarget>,
 }
 
 impl Default for DashScopeTtsClient {
@@ -500,6 +518,8 @@ impl Default for DashScopeTtsClient {
             retry_backoff: Duration::from_millis(250),
             #[cfg(test)]
             test_platform: None,
+            #[cfg(test)]
+            test_audio_target: None,
         }
     }
 }
@@ -577,6 +597,16 @@ impl DashScopeTtsClient {
             .map_err(AttemptFailure::transport)?;
         let mut stream = start_tls(tcp, deadline, platform.tls_config, &platform.target.host)
             .map_err(AttemptFailure::transport)?;
+        if platform.target.request_target == TTS_REQUEST_TARGET {
+            return self.synthesize_http_once(
+                &mut stream,
+                secret,
+                request,
+                &platform.target,
+                transport,
+                deadline,
+            );
+        }
         let mut pending = authorize_tts_websocket(&mut stream, secret, &platform.target)?;
         run_tts_session(&mut stream, &mut pending, request, transport)
     }
@@ -594,7 +624,74 @@ impl DashScopeTtsClient {
             })
             .map_err(map_verification_error);
         }
-        prepare_platform(deadline).map_err(map_verification_error)
+        run_blocking_with_deadline(deadline, || {
+            Ok(PreparedPlatform {
+                target: HandshakeTarget::tts(),
+                tls_config: build_tls_config()?,
+                proxy: proxy_from_environment()?,
+            })
+        })
+        .map_err(map_verification_error)
+    }
+
+    fn synthesize_http_once(
+        &self,
+        stream: &mut DeadlineTls,
+        secret: &SecretBytes,
+        request: &TtsRequest<'_>,
+        target: &HandshakeTarget,
+        transport: TransportRoute,
+        deadline: Instant,
+    ) -> Result<TtsAudio, AttemptFailure> {
+        let response = post_batch_tts_request(stream, secret, target, request)?;
+        let (audio_target, characters) = parse_batch_tts_response(&response)?;
+        let audio_platform = self.prepare_tts_audio_platform(deadline, audio_target)?;
+        let wav = get_batch_tts_audio(deadline, audio_platform)?;
+        let pcm = decode_wav(&wav)
+            .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+        let samples = u64::try_from(pcm.len() / 2)
+            .map_err(|_| AttemptFailure::terminal(TtsError::AudioLimit))?;
+        Ok(TtsAudio {
+            pcm,
+            receipt: TtsReceipt {
+                model: TTS_MODEL,
+                voice: request.voice.to_owned(),
+                sample_rate: TTS_SAMPLE_RATE,
+                samples,
+                characters,
+                transport: transport.as_str(),
+                attempts: 1,
+            },
+        })
+    }
+
+    fn prepare_tts_audio_platform(
+        &self,
+        deadline: Instant,
+        target: HandshakeTarget,
+    ) -> Result<PreparedPlatform, AttemptFailure> {
+        #[cfg(test)]
+        if let (Some(platform), Some(test_target)) =
+            (self.test_platform.clone(), self.test_audio_target.clone())
+        {
+            return run_blocking_with_deadline(deadline, move || {
+                std::thread::sleep(platform.setup_delay);
+                Ok(PreparedPlatform {
+                    target: test_target,
+                    tls_config: platform.tls_config,
+                    proxy: platform.proxy,
+                })
+            })
+            .map_err(AttemptFailure::transport);
+        }
+        run_blocking_with_deadline(deadline, move || {
+            Ok(PreparedPlatform {
+                target,
+                tls_config: build_tls_config()?,
+                proxy: proxy_from_environment()?,
+            })
+        })
+        .map_err(AttemptFailure::transport)
     }
 }
 
@@ -715,10 +812,276 @@ fn validate_tts_request(request: &TtsRequest<'_>) -> Result<(), TtsError> {
     }
 }
 
+fn post_batch_tts_request(
+    stream: &mut DeadlineTls,
+    secret: &SecretBytes,
+    target: &HandshakeTarget,
+    tts: &TtsRequest<'_>,
+) -> Result<Zeroizing<Vec<u8>>, AttemptFailure> {
+    let body = Zeroizing::new(
+        serde_json::to_vec(&serde_json::json!({
+            "model": TTS_MODEL,
+            "input": {
+                "text": tts.text,
+                "voice": tts.voice,
+                "format": "wav",
+                "sample_rate": TTS_SAMPLE_RATE,
+                "instruction": tts.instructions
+            }
+        }))
+        .map_err(|_| AttemptFailure::terminal(TtsError::InvalidRequest))?,
+    );
+    let mut request = Zeroizing::new(Vec::with_capacity(
+        512 + secret.as_slice().len() + body.len(),
+    ));
+    request.extend_from_slice(b"POST ");
+    request.extend_from_slice(target.request_target.as_bytes());
+    request.extend_from_slice(b" HTTP/1.1\r\nHost: ");
+    request.extend_from_slice(target.host.as_bytes());
+    if target.port != 443 {
+        request.extend_from_slice(b":");
+        request.extend_from_slice(target.port.to_string().as_bytes());
+    }
+    request.extend_from_slice(b"\r\nAuthorization: Bearer ");
+    request.extend_from_slice(secret.as_slice());
+    request.extend_from_slice(b"\r\nContent-Type: application/json\r\nConnection: close\r\n");
+    request.extend_from_slice(b"User-Agent: codex-keyboard/0.1\r\nContent-Length: ");
+    request.extend_from_slice(body.len().to_string().as_bytes());
+    request.extend_from_slice(b"\r\n\r\n");
+    request.extend_from_slice(&body);
+
+    // A partial TLS write may already have submitted the billable request.
+    stream
+        .write_all(&request)
+        .and_then(|()| stream.flush())
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+    read_batch_tts_response(stream)
+}
+
+fn read_batch_tts_response(stream: &mut DeadlineTls) -> Result<Zeroizing<Vec<u8>>, AttemptFailure> {
+    let mut response = Zeroizing::new(Vec::with_capacity(4096));
+    let header_end = loop {
+        match scan_http_header(&response, MAX_HTTP_HEADER_BYTES) {
+            HeaderScan::Complete(end) => break end,
+            HeaderScan::TooLarge => {
+                return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+            }
+            HeaderScan::NeedMore => {}
+        }
+        let mut chunk = [0_u8; 4096];
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+        if read == 0 {
+            return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+        }
+        response.extend_from_slice(&chunk[..read]);
+    };
+    let body_length = validate_batch_tts_header(&response[..header_end])?;
+    if body_length > MAX_TTS_RESPONSE_BYTES {
+        return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+    }
+    while response.len() < header_end + body_length {
+        let remaining = header_end + body_length - response.len();
+        let mut chunk = [0_u8; 4096];
+        let read_limit = remaining.min(chunk.len());
+        let read = stream
+            .read(&mut chunk[..read_limit])
+            .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+        if read == 0 {
+            return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+        }
+        response.extend_from_slice(&chunk[..read]);
+    }
+    if response.len() != header_end + body_length {
+        return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+    }
+    Ok(Zeroizing::new(response[header_end..].to_vec()))
+}
+
+fn validate_batch_tts_header(header: &[u8]) -> Result<usize, AttemptFailure> {
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut parsed = httparse::Response::new(&mut headers);
+    if !parsed
+        .parse(header)
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?
+        .is_complete()
+        || parsed.version != Some(1)
+    {
+        return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+    }
+    match parsed.code {
+        Some(200) => {}
+        Some(401 | 403) => return Err(AttemptFailure::terminal(TtsError::Rejected)),
+        Some(429) => return Err(AttemptFailure::terminal(TtsError::RateLimited)),
+        Some(500..=599) => return Err(AttemptFailure::terminal(TtsError::Unavailable)),
+        _ => return Err(AttemptFailure::terminal(TtsError::Protocol)),
+    }
+    if unique_header_value(&parsed, "transfer-encoding")
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?
+        .is_some()
+    {
+        return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+    }
+    let length = unique_header_value(&parsed, "content-length")
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?
+        .ok_or_else(|| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+    std::str::from_utf8(length)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))
+}
+
+fn parse_batch_tts_response(
+    response: &[u8],
+) -> Result<(HandshakeTarget, Option<u64>), AttemptFailure> {
+    let value: serde_json::Value = serde_json::from_slice(response)
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+    if value
+        .pointer("/output/finish_reason")
+        .and_then(serde_json::Value::as_str)
+        != Some("stop")
+    {
+        return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+    }
+    let url = value
+        .pointer("/output/audio/url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+    let target = parse_batch_tts_audio_url(url)?;
+    let characters = value
+        .pointer("/usage/characters")
+        .and_then(serde_json::Value::as_u64);
+    Ok((target, characters))
+}
+
+fn parse_batch_tts_audio_url(url: &str) -> Result<HandshakeTarget, AttemptFailure> {
+    let https_prefix = format!("https://{TTS_AUDIO_HOST}");
+    let http_prefix = format!("http://{TTS_AUDIO_HOST}");
+    let request_target = url
+        .strip_prefix(&https_prefix)
+        .or_else(|| url.strip_prefix(&http_prefix))
+        .filter(|target| {
+            target.starts_with('/')
+                && target.len() <= 16 * 1024
+                && target.is_ascii()
+                && !target.contains('#')
+                && !target
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() || byte == b' ')
+        })
+        .ok_or_else(|| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+    Ok(HandshakeTarget {
+        host: TTS_AUDIO_HOST.to_owned(),
+        port: 443,
+        request_target: request_target.to_owned(),
+    })
+}
+
+fn get_batch_tts_audio(
+    deadline: Instant,
+    platform: PreparedPlatform,
+) -> Result<Zeroizing<Vec<u8>>, AttemptFailure> {
+    let (tcp, _) = connect_transport(deadline, &platform.target, platform.proxy)
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+    let mut stream = start_tls(tcp, deadline, platform.tls_config, &platform.target.host)
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+    let mut request = Vec::with_capacity(256 + platform.target.request_target.len());
+    request.extend_from_slice(b"GET ");
+    request.extend_from_slice(platform.target.request_target.as_bytes());
+    request.extend_from_slice(b" HTTP/1.1\r\nHost: ");
+    request.extend_from_slice(platform.target.host.as_bytes());
+    if platform.target.port != 443 {
+        request.extend_from_slice(b":");
+        request.extend_from_slice(platform.target.port.to_string().as_bytes());
+    }
+    request.extend_from_slice(
+        b"\r\nAccept: audio/wav, audio/x-wav\r\nConnection: close\r\nUser-Agent: codex-keyboard/0.1\r\n\r\n",
+    );
+    stream
+        .write_all(&request)
+        .and_then(|()| stream.flush())
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+
+    let mut response = Zeroizing::new(Vec::with_capacity(64 * 1024));
+    let header_end = loop {
+        match scan_http_header(&response, MAX_HTTP_HEADER_BYTES) {
+            HeaderScan::Complete(end) => break end,
+            HeaderScan::TooLarge => {
+                return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+            }
+            HeaderScan::NeedMore => {}
+        }
+        let mut chunk = [0_u8; 4096];
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+        if read == 0 {
+            return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+        }
+        response.extend_from_slice(&chunk[..read]);
+    };
+    let body_length = validate_batch_tts_audio_header(&response[..header_end])?;
+    if body_length > MAX_TTS_WAV_BYTES {
+        return Err(AttemptFailure::terminal(TtsError::AudioLimit));
+    }
+    while response.len() < header_end + body_length {
+        let remaining = header_end + body_length - response.len();
+        let mut chunk = [0_u8; 8192];
+        let read_limit = remaining.min(chunk.len());
+        let read = stream
+            .read(&mut chunk[..read_limit])
+            .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+        if read == 0 {
+            return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+        }
+        response.extend_from_slice(&chunk[..read]);
+    }
+    if response.len() != header_end + body_length {
+        return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+    }
+    Ok(Zeroizing::new(response[header_end..].to_vec()))
+}
+
+fn validate_batch_tts_audio_header(header: &[u8]) -> Result<usize, AttemptFailure> {
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut parsed = httparse::Response::new(&mut headers);
+    if !parsed
+        .parse(header)
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?
+        .is_complete()
+        || parsed.version != Some(1)
+        || parsed.code != Some(200)
+    {
+        return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+    }
+    let content_type = unique_header_value(&parsed, "content-type")
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| matches!(*value, "audio/wav" | "audio/x-wav"))
+        .ok_or_else(|| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+    let _ = content_type;
+    if unique_header_value(&parsed, "transfer-encoding")
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?
+        .is_some()
+    {
+        return Err(AttemptFailure::terminal(TtsError::AmbiguousAfterCommit));
+    }
+    let length = unique_header_value(&parsed, "content-length")
+        .map_err(|_| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?
+        .ok_or_else(|| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))?;
+    std::str::from_utf8(length)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| AttemptFailure::terminal(TtsError::AmbiguousAfterCommit))
+}
+
 fn prepare_platform(deadline: Instant) -> Result<PreparedPlatform, VerificationError> {
     run_blocking_with_deadline(deadline, || {
         Ok(PreparedPlatform {
-            target: HandshakeTarget::production(),
+            target: HandshakeTarget::verification(),
             tls_config: build_tls_config()?,
             proxy: proxy_from_environment()?,
         })
@@ -1305,8 +1668,8 @@ fn parse_created(
         .pointer("/session/model")
         .and_then(serde_json::Value::as_str)
     {
-        Some(TTS_MODEL) => TTS_MODEL,
-        Some(TTS_MODEL_SNAPSHOT) => TTS_MODEL_SNAPSHOT,
+        Some(DASHSCOPE_VERIFICATION_MODEL) => DASHSCOPE_VERIFICATION_MODEL,
+        Some(DASHSCOPE_VERIFICATION_MODEL_SNAPSHOT) => DASHSCOPE_VERIFICATION_MODEL_SNAPSHOT,
         _ => return Err(AttemptFailure::terminal(TtsError::Protocol)),
     };
     let session_id = service_id(event.pointer("/session/id"), false)?;
@@ -2045,8 +2408,8 @@ fn classify_server_event(payload: &[u8]) -> Result<ServerEvent, VerificationErro
                 .and_then(serde_json::Value::as_str)
                 .ok_or(VerificationError::Protocol)?;
             let model = match model {
-                TTS_MODEL => TTS_MODEL,
-                TTS_MODEL_SNAPSHOT => TTS_MODEL_SNAPSHOT,
+                DASHSCOPE_VERIFICATION_MODEL => DASHSCOPE_VERIFICATION_MODEL,
+                DASHSCOPE_VERIFICATION_MODEL_SNAPSHOT => DASHSCOPE_VERIFICATION_MODEL_SNAPSHOT,
                 _ => return Err(VerificationError::Protocol),
             };
             Ok(ServerEvent::Created {
@@ -2619,7 +2982,7 @@ mod tests {
                 "session.created",
                 serde_json::json!({"session": {
                     "id": "sess-test",
-                    "model": TTS_MODEL,
+                    "model": DASHSCOPE_VERIFICATION_MODEL,
                     "mode": "server_commit",
                     "voice": "Cherry",
                     "response_format": "pcm",
@@ -2643,7 +3006,7 @@ mod tests {
                 "session.updated",
                 serde_json::json!({"session": {
                     "id": "sess-test",
-                    "model": TTS_MODEL,
+                    "model": DASHSCOPE_VERIFICATION_MODEL,
                     "voice": "Cherry",
                     "mode": "commit",
                     "response_format": "pcm",
@@ -2897,6 +3260,150 @@ mod tests {
                 proxy: None,
                 setup_delay: Duration::ZERO,
             }),
+            test_audio_target: None,
+        }
+    }
+
+    fn read_http_request<R: Read>(reader: &mut R) -> (Vec<u8>, Vec<u8>) {
+        let mut request = Vec::new();
+        let header_end = loop {
+            match scan_http_header(&request, MAX_HTTP_HEADER_BYTES) {
+                HeaderScan::Complete(end) => break end,
+                HeaderScan::TooLarge => panic!("test request header exceeded its bound"),
+                HeaderScan::NeedMore => {}
+            }
+            let mut chunk = [0_u8; 512];
+            let count = reader.read(&mut chunk).unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&chunk[..count]);
+        };
+        let mut headers = [httparse::EMPTY_HEADER; 32];
+        let mut parsed = httparse::Request::new(&mut headers);
+        assert!(parsed.parse(&request[..header_end]).unwrap().is_complete());
+        let content_length = parsed
+            .headers
+            .iter()
+            .find(|header| header.name.eq_ignore_ascii_case("content-length"))
+            .map(|header| std::str::from_utf8(header.value).unwrap().parse().unwrap())
+            .unwrap_or(0_usize);
+        while request.len() < header_end + content_length {
+            let mut chunk = [0_u8; 512];
+            let remaining = header_end + content_length - request.len();
+            let read_limit = remaining.min(chunk.len());
+            let count = reader.read(&mut chunk[..read_limit]).unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        (
+            request[..header_end].to_vec(),
+            request[header_end..header_end + content_length].to_vec(),
+        )
+    }
+
+    fn spawn_batch_tts_peer(
+        disconnect_after_post: bool,
+    ) -> (u16, Arc<ClientConfig>, JoinHandle<bool>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (client, server) = test_tls_configs();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let connection = ServerConnection::new(Arc::clone(&server)).unwrap();
+            let mut stream = StreamOwned::new(connection, stream);
+            let (headers, body) = read_http_request(&mut stream);
+            let headers = std::str::from_utf8(&headers).unwrap();
+            assert!(headers.starts_with(&format!("POST {TTS_REQUEST_TARGET} HTTP/1.1\r\n")));
+            assert!(headers.contains("Authorization: Bearer test-tts-credential\r\n"));
+            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(request["model"], TTS_MODEL);
+            assert_eq!(request["input"]["text"], "test summary");
+            assert_eq!(request["input"]["voice"], "longanfengyue");
+            assert_eq!(request["input"]["format"], "wav");
+            assert_eq!(request["input"]["sample_rate"], TTS_SAMPLE_RATE);
+            assert_eq!(request["input"]["instruction"], "natural work briefing");
+            if disconnect_after_post {
+                drop(stream);
+                listener.set_nonblocking(true).unwrap();
+                let deadline = Instant::now() + Duration::from_millis(100);
+                while Instant::now() < deadline {
+                    if listener.accept().is_ok() {
+                        return true;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                return false;
+            }
+            let response = serde_json::to_vec(&serde_json::json!({
+                "output": {
+                    "audio": {
+                        "url": format!("http://{TTS_AUDIO_HOST}/audio/test.wav?token=signed")
+                    },
+                    "finish_reason": "stop"
+                },
+                "usage": {"characters": 12},
+                "request_id": "request-test"
+            }))
+            .unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len()
+            )
+            .unwrap();
+            stream.write_all(&response).unwrap();
+            stream.flush().unwrap();
+            drop(stream);
+
+            let (stream, _) = listener.accept().unwrap();
+            let connection = ServerConnection::new(server).unwrap();
+            let mut stream = StreamOwned::new(connection, stream);
+            let headers = read_headers(&mut stream, MAX_HTTP_HEADER_BYTES);
+            let headers = std::str::from_utf8(&headers).unwrap();
+            assert!(headers.starts_with("GET /audio/test.wav?token=signed HTTP/1.1\r\n"));
+            assert!(!headers.contains("Authorization:"));
+            let pcm = [0_u8, 0, 1, 0, 2, 0, 3, 0];
+            let artifacts = crate::audio::encode_tts_audio(&pcm).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/x-wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                artifacts.wav().len()
+            )
+            .unwrap();
+            stream.write_all(artifacts.wav()).unwrap();
+            stream.flush().unwrap();
+            false
+        });
+        (port, client, handle)
+    }
+
+    fn test_batch_tts_client(port: u16, tls_config: Arc<ClientConfig>) -> DashScopeTtsClient {
+        DashScopeTtsClient {
+            timeout: Duration::from_secs(2),
+            max_attempts: 3,
+            retry_backoff: Duration::from_millis(1),
+            test_platform: Some(TestPlatform {
+                target: HandshakeTarget {
+                    host: "localhost".into(),
+                    port,
+                    request_target: TTS_REQUEST_TARGET.into(),
+                },
+                tls_config,
+                proxy: None,
+                setup_delay: Duration::ZERO,
+            }),
+            test_audio_target: Some(HandshakeTarget {
+                host: "localhost".into(),
+                port,
+                request_target: "/audio/test.wav?token=signed".into(),
+            }),
+        }
+    }
+
+    fn batch_request() -> TtsRequest<'static> {
+        TtsRequest {
+            text: "test summary",
+            voice: "longanfengyue",
+            instructions: "natural work briefing",
         }
     }
 
@@ -3024,7 +3531,7 @@ mod tests {
         )
         .unwrap();
         let event = format!(
-            r#"{{"event_id":"event-integration","type":"session.created","session":{{"model":"{TTS_MODEL}"}}}}"#
+            r#"{{"event_id":"event-integration","type":"session.created","session":{{"model":"{DASHSCOPE_VERIFICATION_MODEL}"}}}}"#
         );
         let split = event.len() / 2;
         write_server_frame(&mut stream, 0x1, false, &event.as_bytes()[..split]);
@@ -3128,14 +3635,65 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_is_beijing_wss_and_pins_requested_model() {
-        assert!(BEIJING_REALTIME_ENDPOINT.starts_with("wss://dashscope.aliyuncs.com/"));
-        assert!(BEIJING_REALTIME_ENDPOINT.ends_with(&format!("model={TTS_MODEL}")));
+    fn endpoints_pin_beijing_verification_and_batch_tts_models() {
+        assert!(BEIJING_VERIFICATION_ENDPOINT.starts_with("wss://dashscope.aliyuncs.com/"));
+        assert!(
+            BEIJING_VERIFICATION_ENDPOINT
+                .ends_with(&format!("model={DASHSCOPE_VERIFICATION_MODEL}"))
+        );
         assert_eq!(
-            TTS_MODEL_SNAPSHOT,
+            DASHSCOPE_VERIFICATION_MODEL_SNAPSHOT,
             "qwen3-tts-instruct-flash-realtime-2026-01-22"
         );
+        assert_eq!(TTS_MODEL, "qwen-audio-3.0-tts-flash");
+        assert_eq!(
+            TTS_REQUEST_TARGET,
+            "/api/v1/services/audio/tts/SpeechSynthesizer"
+        );
         assert!(build_tls_config().is_ok());
+    }
+
+    #[test]
+    fn batch_tts_submits_the_complete_text_once_and_downloads_validated_wav() {
+        let (port, tls, peer) = spawn_batch_tts_peer(false);
+        let client = test_batch_tts_client(port, tls);
+        let (accounts, store) = tts_accounts_and_store();
+        let audio = client
+            .synthesize(&store, &accounts, batch_request())
+            .unwrap();
+        assert_eq!(audio.pcm(), [0, 0, 1, 0, 2, 0, 3, 0]);
+        assert_eq!(audio.receipt().model, TTS_MODEL);
+        assert_eq!(audio.receipt().voice, "longanfengyue");
+        assert_eq!(audio.receipt().sample_rate, TTS_SAMPLE_RATE);
+        assert_eq!(audio.receipt().samples, 4);
+        assert_eq!(audio.receipt().characters, Some(12));
+        assert_eq!(audio.receipt().attempts, 1);
+        assert!(!peer.join().unwrap());
+    }
+
+    #[test]
+    fn batch_tts_rejects_untrusted_audio_urls_and_never_reposts_ambiguous_requests() {
+        for url in [
+            "https://example.com/audio.wav",
+            "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com.evil.test/audio.wav",
+            "https://user@dashscope-result-bj.oss-cn-beijing.aliyuncs.com/audio.wav",
+            "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/audio.wav#fragment",
+        ] {
+            assert!(parse_batch_tts_audio_url(url).is_err());
+        }
+        assert!(
+            parse_batch_tts_audio_url(&format!("http://{TTS_AUDIO_HOST}/audio.wav?token=signed"))
+                .is_ok()
+        );
+
+        let (port, tls, peer) = spawn_batch_tts_peer(true);
+        let client = test_batch_tts_client(port, tls);
+        let (accounts, store) = tts_accounts_and_store();
+        assert!(matches!(
+            client.synthesize(&store, &accounts, batch_request()),
+            Err(TtsError::AmbiguousAfterCommit)
+        ));
+        assert!(!peer.join().unwrap(), "batch TTS POST was retried");
     }
 
     #[test]
@@ -3145,7 +3703,7 @@ mod tests {
         let (accounts, store) = tts_accounts_and_store();
         let audio = client.synthesize(&store, &accounts, request()).unwrap();
         assert_eq!(audio.pcm(), [0, 0, 1, 0, 2, 0, 3, 0]);
-        assert_eq!(audio.receipt().model, TTS_MODEL);
+        assert_eq!(audio.receipt().model, LEGACY_TTS_MODEL);
         assert_eq!(audio.receipt().sample_rate, 48_000);
         assert_eq!(audio.receipt().samples, 4);
         assert_eq!(audio.receipt().characters, Some(12));
@@ -3307,7 +3865,7 @@ mod tests {
     #[test]
     fn session_event_and_audio_delta_counts_are_bounded() {
         let mut state = TtsSessionState {
-            model: TTS_MODEL,
+            model: LEGACY_TTS_MODEL,
             session_id: "sess-test".into(),
             response_id: Some("resp-test".into()),
             item_id: Some("item-test".into()),
@@ -3405,7 +3963,7 @@ mod tests {
                 .verify(&SecretBytes::new(b"test-credential-1".to_vec()))
                 .unwrap();
             assert_eq!(receipt.event_id, "event-integration");
-            assert_eq!(receipt.model, TTS_MODEL);
+            assert_eq!(receipt.model, DASHSCOPE_VERIFICATION_MODEL);
             assert_eq!(
                 receipt.transport,
                 if behind_proxy {
@@ -3535,12 +4093,12 @@ mod tests {
     #[test]
     fn session_created_requires_authoritative_event_and_requested_model() {
         let payload = format!(
-            r#"{{"event_id":"event-authoritative","type":"session.created","session":{{"model":"{TTS_MODEL}"}}}}"#
+            r#"{{"event_id":"event-authoritative","type":"session.created","session":{{"model":"{DASHSCOPE_VERIFICATION_MODEL}"}}}}"#
         );
         assert!(matches!(
             classify_server_event(payload.as_bytes()),
             Ok(ServerEvent::Created { event_id, model })
-                if event_id == "event-authoritative" && model == TTS_MODEL
+                if event_id == "event-authoritative" && model == DASHSCOPE_VERIFICATION_MODEL
         ));
         assert!(
             classify_server_event(
@@ -3562,7 +4120,7 @@ mod tests {
             let payload = serde_json::json!({
                 "event_id": event_id,
                 "type": "session.created",
-                "session": { "model": TTS_MODEL }
+                "session": { "model": DASHSCOPE_VERIFICATION_MODEL }
             });
             assert!(matches!(
                 classify_server_event(payload.to_string().as_bytes()),

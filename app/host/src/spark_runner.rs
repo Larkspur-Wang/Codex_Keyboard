@@ -37,7 +37,8 @@ use crate::summary::{
     source_evidence_quote_budget,
 };
 
-pub const SPARK_MODEL: &str = "gpt-5.3-codex-spark";
+pub const SPARK_MODEL: &str = "gpt-5.6-luna";
+pub const SPARK_REASONING_EFFORT: &str = "high";
 const DISABLED_SPARK_FEATURES: &[&str] = &[
     "plugins",
     "remote_plugin",
@@ -622,7 +623,7 @@ fn build_prompt(
     claim: &SummaryClaim,
     previous_unheard: Option<&SummaryDocument>,
 ) -> Result<Zeroizing<Vec<u8>>, SparkError> {
-    const INSTRUCTIONS: &[u8] = b"Create a concrete cumulative unread task summary from the JSON input below. Each new completion contains only the authoritative final assistant reply from one completed task turn. Summarize only what those assistant_final fields reported: the user-visible result, still-relevant next work, and explicit decisions. Do not invent or reconstruct user messages, tool calls, intermediate progress, tests, logs, hidden reasoning, or implementation details that are not useful to the user. For every new completion, source_evidence must contain exactly one item in the same order: copy completion_id and copy required_evidence_quote exactly into exact_quote. source_evidence is private audit metadata, not narration: do not paste required_evidence_quote into spoken_text merely to satisfy validation. When previous_unheard is present, it is required cumulative context: preserve its facts, pending, and decisions in the matching output arrays, then compress and naturally re-summarize only the still-relevant old unread content together with every new completion. Do not copy previous spoken_text verbatim and do not narrate a chronological history. Write spoken_text as a natural Simplified Chinese briefing of at most 480 letters, digits, or Han characters. Lead immediately with the newest concrete user-visible result, prioritizing the last new completion, then briefly fold in other material unread outcomes or decisions. End with a next action only when the source contains a real actionable next step; never add a generic closing such as saying work can continue. For an ordinary batch of one to five completions, aim for roughly 120 to 180 Chinese characters, but extend when necessary rather than dropping materially useful meaning. It must be self-contained and say what was actually completed, what result matters, and any relevant next step or decision; do not merely say that a task is done. Omit test commands, validation mechanics, and implementation detail unless the user must act on them. The TTS reads spoken_text exactly, so never include schema labels, evidence excerpts, validation notes, section headings, or boilerplate that a person should not hear. Return only the output-schema JSON. covers_new_completions must exactly equal the ordered completion_id values in new_completions. Never emit credentials, hidden reasoning, or local absolute paths.\n";
+    const INSTRUCTIONS: &[u8] = b"Create a concrete cumulative unread task summary from the JSON input below. Each new completion contains only the authoritative final assistant reply from one completed task turn. Summarize only what those assistant_final fields reported: the user-visible result, still-relevant next work, and explicit decisions. Do not invent or reconstruct user messages, tool calls, intermediate progress, tests, logs, hidden reasoning, or implementation details that are not useful to the user. For every new completion, source_evidence must contain exactly one item in the same order: copy completion_id and copy required_evidence_quote exactly into exact_quote. source_evidence is private audit metadata, not narration: do not paste required_evidence_quote into spoken_text merely to satisfy validation. When previous_unheard is present, it is required cumulative context: preserve its facts, pending, and decisions in the matching output arrays, then compress and naturally re-summarize only the still-relevant old unread content together with every new completion. Do not copy previous spoken_text verbatim and do not narrate a chronological history. Write spoken_text as a natural Simplified Chinese briefing of at most 480 letters, digits, or Han characters. Match its length to the actual information: keep a trivial confirmation to one short sentence; for an ordinary result, retain only the most important conclusion, core numbers, limitations, decisions, and any action the user truly needs; use more length for cumulative unread material only when needed to preserve useful meaning. Never pad toward a target length or paraphrase the whole source. Lead immediately with the newest concrete user-visible result, prioritizing the last new completion, then briefly fold in other material unread outcomes or decisions. End with a next action only when the source contains a real actionable next step; never add a generic closing such as saying work can continue. It must be self-contained and say what was actually completed, what result matters, and any relevant next step or decision; do not merely say that a task is done. Omit test commands, validation mechanics, and implementation detail unless the user must act on them. The TTS reads spoken_text exactly, so never include schema labels, evidence excerpts, validation notes, section headings, or boilerplate that a person should not hear. Return only the output-schema JSON. covers_new_completions must exactly equal the ordered completion_id values in new_completions. Never emit credentials, hidden reasoning, or local absolute paths.\n";
     let completions = assistant_completions(claim)?;
     let mut prompt = BoundedSensitiveWriter::new(MAX_PROMPT_BYTES);
     prompt
@@ -1795,6 +1796,8 @@ fn spark_command(
         "--skip-git-repo-check",
         "--config",
         "approval_policy=\"never\"",
+        "--config",
+        "model_reasoning_effort=\"high\"",
         "--output-schema",
     ]);
     command.arg(schema);
@@ -2474,7 +2477,10 @@ mod tests {
         assert!(prompt.contains("prioritizing the last new completion"));
         assert!(prompt.contains("do not narrate a chronological history"));
         assert!(prompt.contains("End with a next action only when"));
-        assert!(prompt.contains("aim for roughly 120 to 180 Chinese characters"));
+        assert!(prompt.contains("Match its length to the actual information"));
+        assert!(prompt.contains("keep a trivial confirmation to one short sentence"));
+        assert!(prompt.contains("Never pad toward a target length"));
+        assert!(!prompt.contains("120 to 180"));
         assert!(!prompt.contains("discard-me-user"));
         assert!(!prompt.contains("discard-me-tool"));
     }
@@ -2595,6 +2601,7 @@ printf '%s' '{{"schema":1,"facts":["done"],"pending":[],"decisions":[],"spoken_t
             "--ignore-user-config",
             "--ignore-rules",
             "approval_policy=\"never\"",
+            "model_reasoning_effort=\"high\"",
             "--output-schema",
             "--output-last-message",
             "-",

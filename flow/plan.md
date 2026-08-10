@@ -14,7 +14,7 @@
 - [x] 锁定 ESP-IDF v5.5.5 重新构建并记录 bootloader/partition/app SHA-256。
 - [x] 用户针对精确 SHA 授权后进入 ROM download mode 并烧录。
 - [x] Desktop 增加四槽任务列表、当前绑定和绑定操作；写入必须经常驻 Host IPC，不能直接争用 SQLite。
-- [x] Desktop 明示 DashScope 北京区 ASR/TTS 就绪状态，模型固定为 `qwen3-asr-flash` / `qwen3-tts-instruct-flash-realtime`。
+- [x] Desktop 明示 DashScope 北京区 ASR/TTS 就绪状态，ASR 固定为 `qwen3-asr-flash`。
 - [x] 验证同 Wi-Fi S6 播放保留的槽 2 未读音频。
 - [x] 验证完整播放后 exact heard/cache deletion；中断播放必须保留。
 - [ ] 验证播放中按 S2，PTT 立即优先且不会误消费音频。
@@ -33,7 +33,10 @@
 - [x] 构建并安装 `Codex Keyboard.app` 到 `/Applications`，升级常驻 Host，验证 App 可启动且四槽状态可读。
 - [x] 自动化、ESP-IDF build、真机信箱灯亮度/熄灭 HIL 完成后提交并推送。
 - [x] 优化 Spark 播报文本：最新结果放在最前，压缩仍相关的旧未听内容，只在确有行动时以下一步收尾；只改 prompt，不新增正文硬编码。
-- [x] 优化 Qwen TTS 听感：保留 Cherry 通用女声，改为自然同事式、中等偏快、短停顿，减少播音腔/客服腔。
+- [x] 首版 Qwen TTS 听感优化：Cherry 通用女声采用自然同事式、中等偏快、短停顿，减少播音腔/客服腔；后续模型替换见下项。
+- [x] 将总结模型切换为 `gpt-5.6-luna` + `high`，并按实际信息量自适应摘要长度，短结果不再为了字数扩写。
+- [x] 将总结播报切换为北京区 `qwen-audio-3.0-tts-flash` + `longanfengyue`，完整 `spoken_text` 只提交一次并缓存一段完整 WAV，不再分句生成后拼接。
+- [x] 完成 Host 自动化、一次真实 48 kHz TTS 冒烟和 live Host 升级，再提交推送本阶段。
 - [x] 将最右第 5 颗灯改为整机任务活动灯：0 个已绑定任务运行时绿色常亮，1/2/3/4 个运行任务分别显示黄/橙/紫/红；全部完成后回到绿色。左起四颗继续只表示四槽未听信箱，短时输入反馈仍可覆盖后恢复。
 - [x] 扩展 Host/固件认证信箱状态协议，运行数只来自绑定任务 rollout 的权威 `task_started -> task_complete` 区间；补 Host、wire golden、LED 映射和 ESP-IDF build 验证。
 - [x] 同步更新《Codex 任务电台》课程 PPT 中的交互草图、灯光语义、架构和完成时序，并重新导出、逐页渲染检查 PPTX/PDF。

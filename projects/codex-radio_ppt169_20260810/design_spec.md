@@ -152,7 +152,7 @@ No numerical data chart is required, so no chart template is locked.
 | P19 | dense | S5-S8：按一下，听对应任务汇报 | Explain playback mapping |
 | P20 | anchor | 键盘是身体，Mac 是管家，Codex 是执行者 | Explain the architecture without jargon |
 | P21 | dense | 说进去：麦克风 → 千问 ASR → Codex | Input path |
-| P22 | dense | 做完后：Codex → Spark 总结 | Completion and summarization |
+| P22 | dense | 做完后：Codex → Luna High 总结 | Completion and summarization |
 | P23 | dense | 听回来：千问 TTS → 本地缓存 → 扬声器 | Output path |
 | P24 | breathing | 真正播完，才算“听过” | Explain exact heard semantics |
 | P25 | dense | 从现有键盘，抽出自己的 App 和固件 | Explain repository extraction and ownership |

@@ -14,7 +14,7 @@
 - [x] 锁定 ESP-IDF v5.5.5 重新构建并记录 bootloader/partition/app SHA-256。
 - [x] 用户针对精确 SHA 授权后进入 ROM download mode 并烧录。
 - [x] Desktop 增加四槽任务列表、当前绑定和绑定操作；写入必须经常驻 Host IPC，不能直接争用 SQLite。
-- [x] Desktop 明示 DashScope 北京区 ASR/TTS 就绪状态，模型固定为 `qwen3-asr-flash` / `qwen3-tts-instruct-flash-realtime`。
+- [x] Desktop 明示 DashScope 北京区 ASR/TTS 就绪状态；当前模型为 `qwen3-asr-flash` / `qwen-audio-3.0-tts-flash`。
 - [x] 验证同 Wi-Fi S6 播放保留的槽 2 未读音频。
 - [x] 验证完整播放后 exact heard/cache deletion；中断播放必须保留。
 - [ ] 验证播放中按 S2，PTT 立即优先且不会误消费音频。
@@ -34,7 +34,7 @@
 - [x] 构建并安装 `Codex Keyboard.app` 到 `/Applications`，升级常驻 Host，验证 App 可启动且四槽状态可读。
 - [x] 自动化、ESP-IDF build、真机信箱灯亮度/熄灭 HIL 完成后提交并推送。
 - [x] 优化 Spark 播报文本：最新结果放在最前，压缩仍相关的旧未听内容，只在确有行动时以下一步收尾；只改 prompt，不新增正文硬编码。
-- [x] 优化 Qwen TTS 听感：保留 Cherry 通用女声，改为自然同事式、中等偏快、短停顿，减少播音腔/客服腔。
+- [x] 总结改用 `gpt-5.6-luna` + `high`，按信息量自适应长度；TTS 改用 `qwen-audio-3.0-tts-flash` + `longanfengyue`，完整摘要一次生成。
 
 ### L2B 长稳与流式播放
 

@@ -10,8 +10,9 @@
 - 上排 `S1-S4` 是槽位 1-4 的 PTT；下排 `S5-S8` 是槽位 1-4 的未读总结播放。
 - 固件不保存 Codex task UUID；`slot -> task` 的唯一真相源是 Mac Host SQLite。
 - Tauri App 是本地 Host 的管理界面，不拥有第二份状态。
-- TTS 固定由 Host 调用北京区 `qwen3-tts-instruct-flash-realtime`；ASR 默认
-  `qwen3-asr-flash`。
+- 总结固定由 Host 隔离调用 `gpt-5.6-luna`，reasoning effort 为 `high`；TTS 固定调用北京区
+  `qwen-audio-3.0-tts-flash`，音色 `longanfengyue`，完整 `spoken_text` 每代只提交一次；ASR
+  默认 `qwen3-asr-flash`。
 - 左起第 1-4 颗灯只表示槽 1-4 的未听信箱；最右第 5 颗灯只表示不同已绑定任务的运行数，
   0/1/2/3/4 个依次为绿/黄/橙/紫/红，全部完成后回绿。
 

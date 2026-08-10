@@ -20,7 +20,7 @@ flowchart LR
     U["Tauri Desktop App"] <-->|"private local control"| H
     H -->|"stdin resume"| C["Codex CLI and rollout"]
     C -->|"task_complete"| H
-    H -->|"ephemeral summary"| S["gpt-5.3-codex-spark"]
+    H -->|"ephemeral summary, high"| S["gpt-5.6-luna"]
     H -->|"Beijing API"| Q["Qwen ASR and TTS"]
     H <--> D["SQLite and encrypted audio cache"]
 ```
@@ -51,9 +51,10 @@ Codex 模型调用仍需要 Mac 具备互联网连接。
 ## 总结与音频
 
 只有 rollout 权威 `task_complete` 才推进 completion ledger。Host 以隔离临时 `CODEX_HOME` 调用
-`gpt-5.3-codex-spark`，把上一版未听摘要的完整结构化文档与新完成内容合并，再调用北京区
-`qwen3-tts-instruct-flash-realtime`。只有服务端完成事件、PCM 校验、WAV/EIAD 编码、加密和 fsync
-全部成功后，才原子发布新 generation。
+`gpt-5.6-luna`，reasoning effort 固定为 `high`，把上一版未听摘要的完整结构化文档与新完成内容
+合并。Host 再把完整 `spoken_text` 一次提交给北京区 `qwen-audio-3.0-tts-flash`，音色固定为
+`longanfengyue`；完整 WAV 通过 HTTPS 下载并校验。只有 WAV/EIAD 编码、加密和 fsync 全部成功后，
+才原子发布新 generation。
 
 Spark 输出必须包含有依据的具体完成事项、可观察结果、待办和决策；只有中文且通过内容质量门禁的
 `spoken_text` 才能进入 TTS。首次质量失败允许用相同 completion 集合有界重试一次，第二次仍失败则不

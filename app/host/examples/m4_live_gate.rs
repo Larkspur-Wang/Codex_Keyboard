@@ -7,7 +7,7 @@ mod macos_gate {
     use std::time::Instant;
 
     use easy_codex_host::cache::{CacheId, CacheLimits, CacheStore};
-    use easy_codex_host::dashscope::{DashScopeTtsClient, TTS_MODEL, TTS_MODEL_SNAPSHOT, TtsAudio};
+    use easy_codex_host::dashscope::{DashScopeTtsClient, TTS_MODEL, TtsAudio};
     use easy_codex_host::paths::AppPaths;
     use easy_codex_host::secrets::{
         DashScopeEnvStore, ImportLock, KeychainAccounts, SecretBytes, SecretStore,
@@ -202,7 +202,7 @@ mod macos_gate {
                 "calls": REAL_TTS_CALLS,
                 "region": "cn-beijing",
                 "requested_model": TTS_MODEL,
-                "official_snapshot": TTS_MODEL_SNAPSHOT,
+                "stable_model": TTS_MODEL,
                 "served_models": models,
                 "voice": SUMMARY_TTS_VOICE,
                 "composed_latency_ms": composed_latency_ms,

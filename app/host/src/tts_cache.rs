@@ -4,7 +4,7 @@ use zeroize::Zeroizing;
 
 use crate::audio::{AudioError, TTS_SAMPLE_RATE, decode_wav, encode_tts_audio, inspect_eiad};
 use crate::cache::{CacheBundle, CacheError, CacheId, CacheStore};
-use crate::dashscope::{TTS_MODEL, TTS_MODEL_SNAPSHOT, TtsAudio};
+use crate::dashscope::{LEGACY_TTS_MODEL, LEGACY_TTS_MODEL_SNAPSHOT, TTS_MODEL, TtsAudio};
 use crate::summary::{SummaryDocument, SummaryDocumentError};
 
 pub const TTS_CACHE_MANIFEST_SCHEMA: u8 = 1;
@@ -211,13 +211,14 @@ fn validate_cached_manifest(
     published: &crate::cache::DecryptedCacheBundle,
 ) -> Result<(), TtsCacheError> {
     drop(Zeroizing::new(manifest.summary.canonical_json()?));
-    let model_valid = matches!(
-        manifest.served_model.as_str(),
-        TTS_MODEL | TTS_MODEL_SNAPSHOT
-    );
+    let current_model = manifest.requested_model == TTS_MODEL && manifest.served_model == TTS_MODEL;
+    let legacy_model = manifest.requested_model == LEGACY_TTS_MODEL
+        && matches!(
+            manifest.served_model.as_str(),
+            LEGACY_TTS_MODEL | LEGACY_TTS_MODEL_SNAPSHOT
+        );
     if manifest.schema != TTS_CACHE_MANIFEST_SCHEMA
-        || manifest.requested_model != TTS_MODEL
-        || !model_valid
+        || !(current_model || legacy_model)
         || manifest.voice.is_empty()
         || manifest.response_format != "pcm"
         || manifest.sample_rate != TTS_SAMPLE_RATE
