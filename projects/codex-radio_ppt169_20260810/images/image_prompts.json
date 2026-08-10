@@ -1,0 +1,58 @@
+{
+  "project": "Codex Task Radio",
+  "generated_at": "2026-08-10T00:00:00+08:00",
+  "deck_rendering": "vector-illustration",
+  "deck_palette": "cool-corporate",
+  "color_scheme": {
+    "primary": "#1E9668",
+    "secondary": "#F3F5F3",
+    "accent": "#2D7D9A"
+  },
+  "items": [
+    {
+      "filename": "cover-task-radio.png",
+      "purpose": "Cover desktop task-radio scene (Slide 01)",
+      "page_role": "hero_page",
+      "text_policy": "none",
+      "aspect_ratio": "16:9",
+      "image_size": "2K",
+      "prompt": "Clean flat vector illustration with bold geometric shapes and confident solid fills. Crisp outlines of consistent weight define every form; there are no gradients, textures, glossy materials, or dramatic lighting. The scene shows a modern work desk viewed slightly from above: one compact eight-key hardware board sits in the lower-right third, a laptop with four simplified task windows sits behind it, and four thin signal paths connect the board to the screen like four quiet radio channels. The device is generic and symbolic, not a fake product rendering. Fog white #F3F5F3 carries most of the canvas as calm space; graphite #19211F anchors the desk and outlines; signal green #1E9668 and channel blue #2D7D9A mark the four paths; a tiny alert yellow #E0A636 light appears on one channel only. Keep the left half and upper center calm for an editable SVG title. Composed as a 1280x720 full-bleed cover background. Human figures are absent. NO text of any kind anywhere in the image: no letters, numbers, labels, UI copy, signs, watermarks, or logos. Color values and color names are rendering guidance only and must not appear as visible text.",
+      "alt_text": "桌面上的八键任务电台连接四个后台任务",
+      "status": "Generated"
+    },
+    {
+      "filename": "multitask-chaos.png",
+      "purpose": "Four Codex jobs competing for attention (Slide 05)",
+      "type": "scene",
+      "page_role": "local",
+      "text_policy": "none",
+      "aspect_ratio": "4:3",
+      "image_size": "1K",
+      "prompt": "Clean flat vector illustration with bold geometric shapes, crisp uniform outlines, flat solid fills, and deliberate negative space. A three-layer narrative scene shows a simplified worker at a desk in the foreground, one laptop in the middle ground with four overlapping task panels, and small notification markers in the background pulling attention in different directions. The person is shown as a simple stylized silhouette with no realistic face or detailed anatomy; posture and hand movement convey repeated window switching. Fog white #F3F5F3 occupies roughly sixty percent of the canvas, graphite #19211F defines the desk and outlines, channel blue #2D7D9A marks active task panels, signal green #1E9668 marks one completed task, and fault coral #D65C4A appears only as two small interruption markers. No fake interface detail is needed; the visual should read immediately as one person managing several concurrent coding jobs. Composed as an 800x560 local illustration with a complete internal composition and no reserved overlay zone. NO text, letters, numbers, labels, screen copy, watermarks, logos, or written symbols. Color values and color names are rendering guidance only and must not appear as visible text.",
+      "alt_text": "一个人不断切换四个并行任务窗口",
+      "status": "Generated"
+    },
+    {
+      "filename": "idea-eight-key-board.png",
+      "purpose": "Idea moment around an eight-key development board (Slide 08)",
+      "page_role": "hero_page",
+      "text_policy": "none",
+      "aspect_ratio": "16:9",
+      "image_size": "2K",
+      "prompt": "Clean flat vector illustration with bold geometric shapes and confident solid fills, crisp consistent outlines, no gradients, no texture, and only a very soft restrained shadow under the main object. One dominant generic eight-key development board occupies the right half of the canvas at a slight desk-level angle. Four upper keys connect by thin channel-blue paths toward a laptop at the far right edge, while four lower keys connect toward a small speaker shape; four tiny green light positions form a clear left-to-right row. Supporting desk objects stay under twenty percent of visual weight. Fog white #F3F5F3 dominates the background, graphite #19211F defines edges, signal green #1E9668 and channel blue #2D7D9A carry the functional paths, with one small alert-yellow #E0A636 detail. Keep the entire left forty percent calm and open for editable SVG text. The board is a symbolic teaching illustration, not a counterfeit photo of the real hardware. Composed as a 1280x720 hero-page image. NO text, letters, numbers, labels, legends, logos, or watermarks. Color values and color names are rendering guidance only and must not appear as visible text.",
+      "alt_text": "八键开发板被重新想成四频道任务对讲机",
+      "status": "Generated"
+    },
+    {
+      "filename": "future-ai-hardware.png",
+      "purpose": "Future extensions around the same board (Slide 29)",
+      "page_role": "hero_page",
+      "text_policy": "none",
+      "aspect_ratio": "16:9",
+      "image_size": "2K",
+      "prompt": "Clean flat vector illustration with bold geometric shapes, crisp consistent outlines, flat color blocks, no gradients, and generous negative space. A compact generic eight-key board sits near the center-bottom as the single physical hub. Four thin paths fan upward toward four simple symbolic destinations: a workshop tool bench, a home computer, a meeting room display, and a small field device. These destinations are simplified icons within small scenes, not separate cards, and none competes with the board. Fog white #F3F5F3 fills most of the canvas; graphite #19211F anchors outlines; signal green #1E9668 and channel blue #2D7D9A carry the paths; alert yellow #E0A636 marks one notification and fault coral #D65C4A appears only on one maintenance symbol. Keep the upper-left third calm for editable SVG title and closing copy. Composed as a 1280x720 hero-page background. Human figures, if present, are simplified silhouettes without realistic faces. NO text of any kind: no letters, numbers, labels, signs, logos, interface copy, or watermarks. Color values and color names are rendering guidance only and must not appear as visible text.",
+      "alt_text": "同一块八键板延伸到更多工作场景",
+      "status": "Generated"
+    }
+  ]
+}

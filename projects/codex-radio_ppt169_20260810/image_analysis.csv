@@ -1,0 +1,9 @@
+No,Filename,Width,Height,AspectRatio,PixelAspectRatio,RatioSource,UsageCount,DisplayRatioVariants,AssetKind,SvgRenderable,PptxNativeSupported,SizeKB,Category,ImageArea_SxS,TextArea_SxS
+1,codex-keyboard-app-dashboard-sanitized.png,1640,1800,0.91,0.91,pixel,1,,bitmap,True,True,156.9,Near square,547x600,593x600
+2,codex-keyboard-app-icon.png,1254,1254,1.00,1.00,pixel,1,,bitmap,True,True,1949.6,Near square,600x600,540x600
+3,easyinput-default-keymap.png,1600,900,1.78,1.78,pixel,1,,bitmap,True,True,901.2,Wide landscape,812x457,328x600
+4,easyinput-v2-assembled-front.png,1600,900,1.78,1.78,pixel,1,,bitmap,True,True,917.3,Wide landscape,812x457,328x600
+5,easyinput-v2-pcb-back.png,3840,2160,1.78,1.78,pixel,1,,bitmap,True,True,1477.8,Wide landscape,812x457,328x600
+6,easyinput-v2-pcb-front.png,3840,2160,1.78,1.78,pixel,1,,bitmap,True,True,977.1,Wide landscape,812x457,328x600
+7,easyinput-v2-schematic-1.png,3840,2160,1.78,1.78,pixel,1,,bitmap,True,True,758.2,Wide landscape,812x457,328x600
+8,easyinput-v2-schematic-2.png,3840,2160,1.78,1.78,pixel,1,,bitmap,True,True,850.2,Wide landscape,812x457,328x600

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <g id="background"><image href="../images/cover-task-radio.png" x="0" y="0" width="1280" height="720" preserveAspectRatio="xMidYMid slice"/><rect x="0" y="0" width="680" height="720" fill="#F3F5F3" fill-opacity="0.92"/></g>
+  <g id="title"><rect x="64" y="96" width="92" height="8" fill="#1E9668"/><text x="64" y="192" font-family="Arial Black, Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="76" font-weight="bold" fill="#19211F"><tspan x="64" dy="0">Codex</tspan><tspan x="64" dy="88">任务电台</tspan></text><text x="68" y="410" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="28" fill="#2D7D9A">一把键盘，远程开发</text></g>
+  <g id="speaker"><text x="68" y="592" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="22" font-weight="bold" fill="#19211F">Lark</text><text x="68" y="628" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="15" fill="#5D6864">知名外企嵌入式软件与 AI 产品转型负责人</text></g>
+  <g id="footer"><text x="68" y="682" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="12" fill="#5D6864">EasyInput V2 × Codex × 本地语音</text></g>
+</svg>
