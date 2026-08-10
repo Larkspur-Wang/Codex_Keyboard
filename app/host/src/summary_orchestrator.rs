@@ -19,7 +19,7 @@ use crate::tts_cache::{
 };
 
 pub const SUMMARY_TTS_VOICE: &str = "Cherry";
-pub const SUMMARY_TTS_INSTRUCTIONS: &str = "请使用自然、清晰、沉稳的普通话女声，语速适中，像可信赖的工作助理播报任务摘要；避免夸张情绪、撒娇和广告腔。";
+pub const SUMMARY_TTS_INSTRUCTIONS: &str = "请用自然、清晰的普通话女声，像熟悉工作的同事当面简洁汇报。整体语速中等偏快，句间只做短停顿；最新结果要清楚突出，待办和决定前稍作停顿。语气平实、有温度，不要播音腔、客服腔、广告腔、夸张情绪或撒娇；英文技术词、数字和缩写按自然语境读，不朗读标点和格式符号。";
 
 pub trait SummaryGenerator {
     fn generate(
@@ -462,6 +462,16 @@ mod tests {
     const SECOND: &str = "019fa972-5cfa-75e1-9008-0b17ade9a349";
     const GENERIC_SOURCE_QUOTE: &str = "助手最终回复已经完成目标功能";
     const SOURCE_QUOTE: &str = "固件已把四个槽位映射到左起四颗灯并保持第五颗灯熄灭";
+
+    #[test]
+    fn summary_tts_instructions_request_natural_concise_delivery() {
+        assert_eq!(SUMMARY_TTS_VOICE, "Cherry");
+        assert!(SUMMARY_TTS_INSTRUCTIONS.contains("熟悉工作的同事"));
+        assert!(SUMMARY_TTS_INSTRUCTIONS.contains("中等偏快"));
+        assert!(SUMMARY_TTS_INSTRUCTIONS.contains("句间只做短停顿"));
+        assert!(SUMMARY_TTS_INSTRUCTIONS.contains("不要播音腔、客服腔"));
+        assert!(SUMMARY_TTS_INSTRUCTIONS.contains("不朗读标点和格式符号"));
+    }
 
     fn source_evidence(claim: &SummaryClaim) -> Vec<SummarySourceEvidence> {
         claim

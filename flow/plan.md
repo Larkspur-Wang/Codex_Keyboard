@@ -31,7 +31,9 @@
 - [x] 将 Host/固件 UDP 窗口共同限制为 production lwIP mailbox 的 6 包，并记录传输完成耗时；不再用超出接收队列的 burst 换取表面吞吐。
 - [x] 用 ImageGen 生成独立 macOS App 图标，产出完整 Tauri icon set 并接入 bundle。
 - [x] 构建并安装 `Codex Keyboard.app` 到 `/Applications`，升级常驻 Host，验证 App 可启动且四槽状态可读。
-- [ ] 自动化、ESP-IDF build、真机信箱灯亮度/熄灭 HIL 完成后提交并推送。
+- [x] 自动化、ESP-IDF build、真机信箱灯亮度/熄灭 HIL 完成后提交并推送。
+- [x] 优化 Spark 播报文本：最新结果放在最前，压缩仍相关的旧未听内容，只在确有行动时以下一步收尾；只改 prompt，不新增正文硬编码。
+- [x] 优化 Qwen TTS 听感：保留 Cherry 通用女声，改为自然同事式、中等偏快、短停顿，减少播音腔/客服腔。
 
 ### L2B 长稳与流式播放
 
