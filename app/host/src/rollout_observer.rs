@@ -77,6 +77,7 @@ pub struct ObserverTick {
     pub inserted: usize,
     pub replayed: usize,
     pub failed_tasks: usize,
+    pub running_tasks: u8,
 }
 
 pub struct RolloutObserver {
@@ -345,14 +346,29 @@ impl RolloutObserver {
         store: &mut S,
     ) -> Result<ObserverTick, StoreError> {
         if Instant::now() < self.next_poll {
-            return Ok(ObserverTick::default());
+            return Ok(ObserverTick {
+                running_tasks: self.running_task_count(),
+                ..ObserverTick::default()
+            });
         }
         self.next_poll = Instant::now() + self.poll_interval;
-        self.poll_bound_tasks_with(store)
+        let mut tick = self.poll_bound_tasks_with(store)?;
+        tick.running_tasks = self.running_task_count();
+        Ok(tick)
     }
 
     pub fn poll_bound_tasks(&mut self, store: &mut StateStore) -> Result<ObserverTick, StoreError> {
-        self.poll_bound_tasks_with(store)
+        let mut tick = self.poll_bound_tasks_with(store)?;
+        tick.running_tasks = self.running_task_count();
+        Ok(tick)
+    }
+
+    fn running_task_count(&self) -> u8 {
+        self.pending
+            .values()
+            .filter(|scan| scan.active.is_some())
+            .count()
+            .min(4) as u8
     }
 
     fn poll_bound_tasks_with<S: RolloutStateAccess>(
@@ -2995,7 +3011,38 @@ mod tests {
         assert_eq!(tick.inserted, 1);
         assert_eq!(tick.replayed, 0);
         assert_eq!(tick.failed_tasks, 0);
+        assert_eq!(tick.running_tasks, 0);
         assert_eq!(store.completion_count(TASK).unwrap(), 1);
+    }
+
+    #[test]
+    fn bound_running_tasks_are_counted_once_until_authoritative_completion() {
+        let temp = tempdir().unwrap();
+        let codex_home = temp.path().join("codex");
+        let rollout = codex_home.join("sessions/rollout.jsonl");
+        fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        fs::write(&rollout, [meta(), started(TURN_A)].concat()).unwrap();
+        write_catalog(&codex_home, &rollout);
+        let snapshot_root = temp.path().join("snapshots");
+        crate::paths::secure_directory(&snapshot_root).unwrap();
+        let mut observer =
+            RolloutObserver::new(CodexTaskCatalog::from_paths(codex_home, snapshot_root));
+        let mut store = store(temp.path());
+        store.set_binding(1, None, TASK).unwrap().unwrap();
+        store.set_binding(2, None, TASK).unwrap().unwrap();
+
+        let running = observer.poll_bound_tasks(&mut store).unwrap();
+        assert_eq!(running.running_tasks, 1);
+        assert_eq!(running.inserted, 0);
+
+        fs::write(
+            &rollout,
+            [meta(), started(TURN_A), completed(TURN_A, "done")].concat(),
+        )
+        .unwrap();
+        let completed = observer.poll_bound_tasks(&mut store).unwrap();
+        assert_eq!(completed.running_tasks, 0);
+        assert_eq!(completed.inserted, 1);
     }
 
     #[test]

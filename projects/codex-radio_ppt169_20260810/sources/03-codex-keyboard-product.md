@@ -80,18 +80,19 @@ DashScope key 只在同一 App Support 根下的 mode-0600 `.env`；cache/device
 4. 固件实际排空 I2S 和尾静音后发送 EIPF；Host 完成 heard/cache transaction 后返回 EIPK。
 5. ACK 丢失可重发；旧 generation、取消、PTT 抢占、超时、断线和播放失败均不能删除缓存。
 
-## 语音信箱灯
+## 五灯状态条
 
 1. 固件的周期 EIHB 心跳序号同时作为一次性 challenge；Host 只响应通过 device secret HMAC 的完整
-   80-byte 心跳，并返回固定 32-byte `EIMB v2`。
-2. EIMB 只携带四槽未读 bitmask、四个逐槽 completion coverage byte 和 HMAC，不携带 task UUID、
-   摘要正文或缓存标识。
+   80-byte 心跳，并返回固定 32-byte `EIMB v3`。
+2. EIMB 只携带四槽未读 bitmask、四个逐槽 completion coverage byte、0-4 的运行任务数和 HMAC，
+   不携带 task UUID、摘要正文或缓存标识。
 3. 固件只接受已配置 Host IPv4、正确 device secret HMAC 且回显最新心跳序号的包；旧包、错来源和
    伪造包均不能改变灯光。
 4. 左起第 1-4 颗灯一一对应槽 1-4，各槽只有未读时才亮绿色；该槽 coverage 从 1 到 16 单调增亮，
-   之后饱和。第 5 颗灯不参与信箱显示，始终熄灭。
-5. 按键、录音、播放、配置和错误等直接反馈可以临时覆盖五灯，反馈结束后恢复最新四槽信箱状态；某槽
-   音频只有真机完整播放并完成 exact heard transaction 后才熄灭对应灯。
+   之后饱和。
+5. 最右第 5 颗灯只表示已绑定 Codex 任务的运行总数：0 个绿色、1 个黄色、2 个橙色、3 个紫色、
+   4 个红色；全部完成后回到绿色。
+6. 按键、录音、播放、配置和错误等直接反馈可以临时覆盖五灯，反馈结束后恢复最新信箱与任务活动状态。
 
 当前完整 PSRAM 预下载只是真机候选。发布版仍需升级为有界 jitter/ring 边下边播。
 

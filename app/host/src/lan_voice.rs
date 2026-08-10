@@ -2343,6 +2343,7 @@ mod tests {
         let playback = ActiveLanPlayback {
             mailbox_status: MailboxStatus {
                 unread_slots: 0b1010,
+                running_tasks: 2,
                 coverage_by_slot: [0, 12, 0, 3],
             },
             ..Default::default()

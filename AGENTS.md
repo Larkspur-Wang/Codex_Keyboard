@@ -12,6 +12,8 @@
 - Tauri App 是本地 Host 的管理界面，不拥有第二份状态。
 - TTS 固定由 Host 调用北京区 `qwen3-tts-instruct-flash-realtime`；ASR 默认
   `qwen3-asr-flash`。
+- 左起第 1-4 颗灯只表示槽 1-4 的未听信箱；最右第 5 颗灯只表示不同已绑定任务的运行数，
+  0/1/2/3/4 个依次为绿/黄/橙/紫/红，全部完成后回绿。
 
 ## 不可破坏的语义
 
@@ -21,6 +23,7 @@
 - 只有固件实际播放完毕并回传匹配 generation，Host 才能标记 heard 和删除缓存。
 - PTT 永远优先于播放；取消、断线、超时和失败不能消费未读总结。
 - EIAU/EIP 控制和音频包必须认证；EIPD 音频必须加密，旧 generation/replay fail closed。
+- `EIMB v3` 的运行数只能来自 rollout 权威 `task_started -> task_complete` 区间；固件不得猜测。
 - 未经用户针对候选镜像精确 SHA 明确授权，不复位或烧录实体键盘。
 
 ## Secret 边界

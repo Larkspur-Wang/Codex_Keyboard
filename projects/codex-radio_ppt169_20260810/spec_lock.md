@@ -10,6 +10,8 @@
 - primary: #1E9668
 - accent: #2D7D9A
 - signal: #E0A636
+- activity_orange: #D9822B
+- activity_purple: #7A4DB3
 - fault: #D65C4A
 - text: #19211F
 - text_secondary: #5D6864
@@ -19,7 +21,7 @@
 
 ## typography
 - font_family: Arial, Arial Unicode MS, Microsoft YaHei, sans-serif
-- title_family: Arial Black, Arial Unicode MS, Microsoft YaHei, Arial, sans-serif
+- title_family: Arial Black, Arial, Arial Unicode MS, Microsoft YaHei, sans-serif
 - numeric_family: Arial, sans-serif
 - code_family: Consolas, Courier New, monospace
 - body: 22

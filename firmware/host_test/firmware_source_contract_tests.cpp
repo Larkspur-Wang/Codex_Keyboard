@@ -1807,7 +1807,7 @@ void peripheral_power_lifecycle_is_system_owned_and_ordered() {
   assert(power_down.find("ready_ = false") < safe_outputs);
   assert(power_down.find("DeviceAwake", rail_low) == std::string::npos);
 
-  assert(app_main.find("0.5.0-easy-codex-lan-playback") !=
+  assert(app_main.find("0.6.0-easy-codex-task-activity") !=
          std::string::npos);
 }
 

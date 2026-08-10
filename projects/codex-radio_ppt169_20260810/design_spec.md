@@ -42,6 +42,8 @@
 | **Primary** | `#1E9668` | Task activity, completed state, key arrows |
 | **Accent** | `#2D7D9A` | Voice and channel paths |
 | **Secondary accent** | `#E0A636` | Unread mailbox and attention |
+| **Activity orange** | `#D9822B` | Two bound tasks running |
+| **Activity purple** | `#7A4DB3` | Three bound tasks running |
 | **Fault accent** | `#D65C4A` | Failures and hard lessons |
 | **Body text** | `#19211F` | Main text and dark anchor pages |
 | **Secondary text** | `#5D6864` | Captions and supporting copy |

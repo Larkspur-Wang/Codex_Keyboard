@@ -16,7 +16,7 @@ const FINISHED_BYTES: usize = 56;
 const FINISHED_ACK_BYTES: usize = 48;
 const DATA_HEADER_BYTES: usize = 40;
 pub const MAILBOX_STATUS_BYTES: usize = 32;
-pub const MAILBOX_STATUS_VERSION: u8 = 2;
+pub const MAILBOX_STATUS_VERSION: u8 = 3;
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackWireError {
@@ -68,6 +68,7 @@ pub struct PlaybackFinished {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MailboxStatus {
     pub unread_slots: u8,
+    pub running_tasks: u8,
     pub coverage_by_slot: [u8; 4],
 }
 
@@ -300,6 +301,7 @@ pub fn encode_mailbox_status(
     packet[..4].copy_from_slice(b"EIMB");
     packet[4] = MAILBOX_STATUS_VERSION;
     packet[5] = status.unread_slots;
+    packet[6] = status.running_tasks;
     put_u32(&mut packet, 8, heartbeat_sequence);
     packet[12..16].copy_from_slice(&status.coverage_by_slot);
     sign(&mut packet, key);
@@ -319,9 +321,10 @@ pub fn decode_mailbox_status(
     verify(packet, key)?;
     let status = MailboxStatus {
         unread_slots: packet[5],
+        running_tasks: packet[6],
         coverage_by_slot: packet[12..16].try_into().unwrap(),
     };
-    if packet[6..8] != [0, 0] || !valid_mailbox_status(status) {
+    if packet[7] != 0 || !valid_mailbox_status(status) {
         return Err(PlaybackWireError::Malformed);
     }
     Ok((status, get_u32(packet, 8)))
@@ -329,6 +332,7 @@ pub fn decode_mailbox_status(
 
 fn valid_mailbox_status(status: MailboxStatus) -> bool {
     status.unread_slots & !0x0F == 0
+        && status.running_tasks <= 4
         && status
             .coverage_by_slot
             .iter()
@@ -514,6 +518,7 @@ mod tests {
 
         let mailbox = MailboxStatus {
             unread_slots: 0b0101,
+            running_tasks: 3,
             coverage_by_slot: [7, 0, 2, 0],
         };
         let mailbox_packet = encode_mailbox_status(mailbox, 0x1122_3344, &key).unwrap();
@@ -525,12 +530,32 @@ mod tests {
             encode_mailbox_status(
                 MailboxStatus {
                     unread_slots: 0,
+                    running_tasks: 0,
                     coverage_by_slot: [1, 0, 0, 0],
                 },
                 1,
                 &key,
             )
             .is_err()
+        );
+        assert!(
+            encode_mailbox_status(
+                MailboxStatus {
+                    unread_slots: 0,
+                    running_tasks: 5,
+                    coverage_by_slot: [0; 4],
+                },
+                1,
+                &key,
+            )
+            .is_err()
+        );
+        let mut invalid_running_count = mailbox_packet.clone();
+        invalid_running_count[6] = 5;
+        sign(&mut invalid_running_count, &key);
+        assert_eq!(
+            decode_mailbox_status(&invalid_running_count, &key),
+            Err(PlaybackWireError::Malformed)
         );
 
         let mut tampered = encode_begin(begin, &key);
@@ -605,13 +630,14 @@ mod tests {
             hex(&encode_mailbox_status(
                 MailboxStatus {
                     unread_slots: 0b0101,
+                    running_tasks: 3,
                     coverage_by_slot: [7, 0, 2, 0],
                 },
                 0x1122_3344,
                 &key,
             )
             .unwrap()),
-            "45494d420205000044332211070002000ed90e142c64334fd4f0c186c94970a0"
+            "45494d42030503004433221107000200ee287f10dfdcd199727c2a2bda61e9ec"
         );
     }
 

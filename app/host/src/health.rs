@@ -8,7 +8,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -254,9 +254,12 @@ impl HostDaemon {
             .expect("observer is present at startup");
         let mut observer_store = self.store.open_observer_store()?;
         let observer_shutdown = Arc::clone(&shutdown);
+        let running_tasks = Arc::new(AtomicU8::new(0));
+        let observer_running_tasks = Arc::clone(&running_tasks);
         let observer_worker = thread::spawn(move || -> Result<(), StoreError> {
             while !observer_shutdown.load(Ordering::Acquire) {
-                let _ = observer.tick_due_worker(&mut observer_store)?;
+                let tick = observer.tick_due_worker(&mut observer_store)?;
+                observer_running_tasks.store(tick.running_tasks, Ordering::Release);
                 thread::sleep(Duration::from_millis(20));
             }
             Ok(())
@@ -301,6 +304,7 @@ impl HostDaemon {
                 };
                 let current = MailboxStatus {
                     unread_slots: snapshot.unread_slots,
+                    running_tasks: running_tasks.load(Ordering::Acquire),
                     coverage_by_slot: snapshot.coverage_by_slot,
                 };
                 if last_mailbox_status != Some(current) {

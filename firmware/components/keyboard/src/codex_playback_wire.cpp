@@ -393,14 +393,15 @@ bool decode_mailbox_status(const std::uint8_t* packet,
   if (status == nullptr || packet_size != kMailboxStatusBytes ||
       !magic_matches(packet, "EIMB") || packet[4U] != kMailboxStatusVersion ||
       !authenticate(packet, packet_size, key) ||
-      !reserved_zero(packet, 6U, 8U)) {
+      packet[7U] != 0U) {
     return false;
   }
   status->unread_slots = packet[5U];
+  status->running_tasks = packet[6U];
   status->heartbeat_sequence = get_u32(packet, 8U);
   std::copy_n(packet + 12U, status->coverage_by_slot.size(),
               status->coverage_by_slot.begin());
-  if ((status->unread_slots & 0xF0U) != 0U) {
+  if ((status->unread_slots & 0xF0U) != 0U || status->running_tasks > 4U) {
     return false;
   }
   for (std::size_t index = 0U; index < status->coverage_by_slot.size(); ++index) {

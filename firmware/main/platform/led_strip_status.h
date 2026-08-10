@@ -43,6 +43,7 @@ class StatusLedStrip {
                         std::uint32_t now_ms);
   void set_mailbox_status(std::uint8_t unread_slots,
                           const std::array<std::uint8_t, 4>& coverage_by_slot,
+                          std::uint8_t running_tasks,
                           std::uint32_t now_ms);
   void show_scroll_event(std::int8_t vertical,
                          std::int8_t horizontal,
@@ -82,6 +83,7 @@ class StatusLedStrip {
   bool agent_status_rendered_ = false;
   std::uint8_t mailbox_unread_slots_ = 0U;
   std::array<std::uint8_t, 4> mailbox_coverage_by_slot_{};
+  std::uint8_t running_tasks_ = 0U;
   bool mailbox_status_active_ = false;
   bool idle_rendered_ = false;
 };

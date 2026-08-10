@@ -145,10 +145,14 @@ void mailbox_status_is_authenticated_and_restored_as_led_background() {
          std::string::npos);
   assert(app.find("apply_pending_mailbox_status(&app, millis())") !=
          std::string::npos);
-  assert(app.find("status.unread_slots, status.coverage_by_slot") !=
-         std::string::npos);
+  assert(app.find("status.unread_slots, status.coverage_by_slot, "
+                  "status.running_tasks") != std::string::npos);
   assert(leds.find("mailbox_frame_for_slots") != std::string::npos);
-  assert(leds.find("if (mailbox_status_active_)") != std::string::npos);
+  const auto mailbox_background = leds.find("if (mailbox_status_active_)");
+  const auto agent_background = leds.find("if (agent_status_valid(now_ms))");
+  assert(mailbox_background != std::string::npos);
+  assert(agent_background != std::string::npos);
+  assert(mailbox_background < agent_background);
 }
 
 }  // namespace

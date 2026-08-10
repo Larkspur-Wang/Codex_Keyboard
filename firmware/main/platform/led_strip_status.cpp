@@ -167,6 +167,7 @@ void StatusLedStrip::clear() {
   agent_status_expires_ms_ = 0;
   mailbox_unread_slots_ = 0U;
   mailbox_coverage_by_slot_ = {};
+  running_tasks_ = 0U;
   mailbox_status_active_ = false;
   set_all({});
   esp_err_t err = ESP_OK;
@@ -217,8 +218,9 @@ void StatusLedStrip::set_agent_status(const ai_keyboard::AgentStatusCommand& com
 
 void StatusLedStrip::set_mailbox_status(std::uint8_t unread_slots,
                                         const std::array<std::uint8_t, 4>& coverage_by_slot,
+                                        std::uint8_t running_tasks,
                                         std::uint32_t now_ms) {
-  bool valid = (unread_slots & 0xF0U) == 0U;
+  bool valid = (unread_slots & 0xF0U) == 0U && running_tasks <= 4U;
   for (std::size_t index = 0U; index < coverage_by_slot.size(); ++index) {
     const bool unread = (unread_slots & (1U << index)) != 0U;
     valid = valid && unread == (coverage_by_slot[index] != 0U);
@@ -226,7 +228,8 @@ void StatusLedStrip::set_mailbox_status(std::uint8_t unread_slots,
   mailbox_unread_slots_ = valid ? unread_slots : 0U;
   mailbox_coverage_by_slot_ = valid ? coverage_by_slot
                                     : std::array<std::uint8_t, 4>{};
-  mailbox_status_active_ = valid && unread_slots != 0U;
+  running_tasks_ = valid ? running_tasks : 0U;
+  mailbox_status_active_ = valid;
   idle_rendered_ = false;
   if (!active_feedback_.active) {
     render_background_status(now_ms);
@@ -371,16 +374,16 @@ bool StatusLedStrip::agent_status_valid(std::uint32_t now_ms) const {
 }
 
 void StatusLedStrip::render_background_status(std::uint32_t now_ms) {
+  if (mailbox_status_active_) {
+    render_mailbox_status();
+    flush();
+    return;
+  }
+
   if (agent_status_valid(now_ms)) {
     render_agent_status();
     flush();
     agent_status_rendered_ = true;
-    return;
-  }
-
-  if (mailbox_status_active_) {
-    render_mailbox_status();
-    flush();
     return;
   }
 
@@ -390,7 +393,7 @@ void StatusLedStrip::render_background_status(std::uint32_t now_ms) {
 
 void StatusLedStrip::render_mailbox_status() {
   const auto frame = easy_codex::mailbox_frame_for_slots(
-      mailbox_coverage_by_slot_);
+      mailbox_coverage_by_slot_, running_tasks_);
   for (std::size_t index = 0U; index < leds_.size(); ++index) {
     leds_[index] = to_rgb(frame[index]);
   }

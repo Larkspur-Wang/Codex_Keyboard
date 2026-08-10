@@ -15,7 +15,7 @@ constexpr std::size_t kPlaybackFinishedBytes = 56U;
 constexpr std::size_t kPlaybackFinishedAckBytes = 48U;
 constexpr std::size_t kPlaybackDataHeaderBytes = 40U;
 constexpr std::size_t kMailboxStatusBytes = 32U;
-constexpr std::uint8_t kMailboxStatusVersion = 2U;
+constexpr std::uint8_t kMailboxStatusVersion = 3U;
 constexpr std::size_t kPlaybackChunkBytes = 1024U;
 constexpr std::size_t kPlaybackMaximumEiadBytes = 4U * 1024U * 1024U;
 constexpr std::uint64_t kPlaybackMaximumSamples = 48000ULL * 150ULL;
@@ -63,6 +63,7 @@ struct PlaybackWireFinished {
 
 struct MailboxWireStatus {
   std::uint8_t unread_slots = 0U;
+  std::uint8_t running_tasks = 0U;
   std::uint32_t heartbeat_sequence = 0U;
   std::array<std::uint8_t, 4> coverage_by_slot{};
 };
