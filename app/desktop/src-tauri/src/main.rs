@@ -77,9 +77,12 @@ fn host_dashboard() -> DashboardProbe {
         Err(error) if is_offline(&error) => DashboardProbe::Offline {
             reason: "host_unreachable",
         },
-        Err(_) => DashboardProbe::ProtocolError {
-            reason: "dashboard_invalid",
-        },
+        Err(error) => {
+            eprintln!("dashboard_probe_failed error={error}");
+            DashboardProbe::ProtocolError {
+                reason: "dashboard_invalid",
+            }
+        }
     }
 }
 

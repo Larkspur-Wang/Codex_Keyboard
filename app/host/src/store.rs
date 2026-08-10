@@ -15,7 +15,7 @@ use crate::paths::{ExplicitFileLock, open_private_file};
 
 pub const SCHEMA_VERSION: i64 = 6;
 pub const MAX_PENDING_JOBS_PER_TASK: u32 = 12;
-pub const MAX_GLOBAL_RUNNING_JOBS: u32 = 2;
+pub const MAX_GLOBAL_RUNNING_JOBS: u32 = 4;
 pub const MAX_SUMMARY_COMPLETIONS_PER_CLAIM: usize = 32;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_TASK_ID_BYTES: usize = 64;
@@ -2522,11 +2522,17 @@ mod tests {
         store.enqueue(&job("a2", "task-a", "2")).unwrap();
         store.enqueue(&job("b1", "task-b", "3")).unwrap();
         store.enqueue(&job("c1", "task-c", "4")).unwrap();
+        store.enqueue(&job("d1", "task-d", "5")).unwrap();
+        store.enqueue(&job("e1", "task-e", "6")).unwrap();
 
         let first = store.claim_next_runnable().unwrap().unwrap();
         let second = store.claim_next_runnable().unwrap().unwrap();
+        let third = store.claim_next_runnable().unwrap().unwrap();
+        let fourth = store.claim_next_runnable().unwrap().unwrap();
         assert_eq!(first.request_id, "a1");
         assert_eq!(second.request_id, "b1");
+        assert_eq!(third.request_id, "c1");
+        assert_eq!(fourth.request_id, "d1");
         assert!(store.claim_next_runnable().unwrap().is_none());
         assert!(
             store

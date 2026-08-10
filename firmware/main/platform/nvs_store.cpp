@@ -4,6 +4,7 @@
 
 #include "esp_log.h"
 #include "keyboard/board_pins.h"
+#include "keyboard/encoder.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -19,6 +20,7 @@ constexpr const char* kPrefsBatteryFullKey = "bat_full_v1";
 constexpr const char* kPrefsBatteryFullKeyV3 = "bat_full_v3";
 constexpr const char* kPrefsGattSchemaRevisionKey = "gatt_rev_v1";
 constexpr const char* kPrefsHostPlatformKey = "host_os_v1";
+constexpr const char* kPrefsSpeakerVolumeKey = "spk_vol_v1";
 
 const char* prefs_config_key() {
 #if defined(EASY_INPUT_BOARD_V2)
@@ -268,6 +270,56 @@ bool NvsConfigStore::save_host_platform(ai_keyboard::HostPlatform platform,
   }
   if (err == ESP_OK) err = nvs_commit(handle);
   if (handle != 0) nvs_close(handle);
+  set_error(out_err, err);
+  return err == ESP_OK;
+}
+
+bool NvsConfigStore::load_speaker_volume(std::uint8_t* level,
+                                         esp_err_t* out_err) const {
+  if (level == nullptr) {
+    set_error(out_err, ESP_ERR_INVALID_ARG);
+    return false;
+  }
+  nvs_handle_t handle = 0;
+  esp_err_t err = nvs_open(kPrefsNamespace, NVS_READONLY, &handle);
+  std::uint8_t stored = 0;
+  if (err == ESP_OK) {
+    err = nvs_get_u8(handle, kPrefsSpeakerVolumeKey, &stored);
+  }
+  if (handle != 0) {
+    nvs_close(handle);
+  }
+  if (err == ESP_OK && stored >= ai_keyboard::kSpeakerVolumeMinimum &&
+      stored <= ai_keyboard::kSpeakerVolumeMaximum) {
+    *level = stored;
+    set_error(out_err, ESP_OK);
+    return true;
+  }
+  if (err == ESP_OK) {
+    err = ESP_ERR_INVALID_STATE;
+  }
+  set_error(out_err, err);
+  return false;
+}
+
+bool NvsConfigStore::save_speaker_volume(std::uint8_t level,
+                                         esp_err_t* out_err) const {
+  if (level < ai_keyboard::kSpeakerVolumeMinimum ||
+      level > ai_keyboard::kSpeakerVolumeMaximum) {
+    set_error(out_err, ESP_ERR_INVALID_ARG);
+    return false;
+  }
+  nvs_handle_t handle = 0;
+  esp_err_t err = nvs_open(kPrefsNamespace, NVS_READWRITE, &handle);
+  if (err == ESP_OK) {
+    err = nvs_set_u8(handle, kPrefsSpeakerVolumeKey, level);
+  }
+  if (err == ESP_OK) {
+    err = nvs_commit(handle);
+  }
+  if (handle != 0) {
+    nvs_close(handle);
+  }
   set_error(out_err, err);
   return err == ESP_OK;
 }

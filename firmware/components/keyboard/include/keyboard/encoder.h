@@ -7,6 +7,16 @@
 namespace ai_keyboard {
 
 constexpr std::size_t kEncoderStepQueueCapacity = 32;
+constexpr std::uint8_t kSpeakerVolumeMinimum = 1;
+constexpr std::uint8_t kSpeakerVolumeMaximum = 10;
+constexpr std::uint8_t kSpeakerVolumeDefault = 7;
+
+std::uint8_t adjust_speaker_volume_for_wired_encoder_step(
+    std::uint8_t current_level,
+    int encoder_step);
+std::uint16_t speaker_volume_gain_per_mille(std::uint8_t level);
+std::int16_t scale_speaker_sample(std::int16_t sample,
+                                  std::uint8_t level);
 
 class EncoderStepQueue {
  public:

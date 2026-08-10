@@ -1,4 +1,9 @@
-import { presentProbe, presentSlotStatus, sortedTasks } from "./view-model.js";
+import {
+  presentDashboardFailure,
+  presentProbe,
+  presentSlotStatus,
+  sortedTasks,
+} from "./view-model.js";
 
 /** @param {string} selector @returns {HTMLElement} */
 function requiredElement(selector) {
@@ -198,9 +203,13 @@ async function refreshDashboard() {
     renderDashboard(probe.dashboard);
     return;
   }
-  elements.taskCount.textContent = "Host 离线";
+  const unavailable = presentDashboardFailure(probe.connection);
+  elements.taskCount.textContent = unavailable.taskCount;
   elements.providerDot.className = "provider-dot offline";
-  elements.providerState.textContent = "不可达";
+  elements.providerState.textContent = unavailable.providerState;
+  elements.asrModel.textContent = unavailable.asrModel;
+  elements.ttsModel.textContent = unavailable.ttsModel;
+  elements.ttsVoice.textContent = unavailable.voice;
 }
 
 async function refresh() {

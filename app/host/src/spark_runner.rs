@@ -32,10 +32,7 @@ use crate::paths::{
 };
 use crate::rollout_observer::{TurnPack, redact_sensitive_text};
 use crate::store::{MAX_SUMMARY_COMPLETIONS_PER_CLAIM, PendingSummaryCompletion, SummaryClaim};
-use crate::summary::{
-    MAX_SUMMARY_DOCUMENT_BYTES, SummaryDocument, required_source_evidence_quote,
-    source_evidence_quote_budget,
-};
+use crate::summary::{MAX_SUMMARY_DOCUMENT_BYTES, SummaryDocument};
 
 pub const SPARK_MODEL: &str = "gpt-5.6-luna";
 pub const SPARK_REASONING_EFFORT: &str = "high";
@@ -580,7 +577,6 @@ struct PromptInput<'a> {
 struct AssistantCompletion<'a> {
     completion_id: &'a str,
     assistant_final: String,
-    required_evidence_quote: String,
 }
 
 fn validate_claim_input(
@@ -623,7 +619,7 @@ fn build_prompt(
     claim: &SummaryClaim,
     previous_unheard: Option<&SummaryDocument>,
 ) -> Result<Zeroizing<Vec<u8>>, SparkError> {
-    const INSTRUCTIONS: &[u8] = b"Create a concrete cumulative unread task summary from the JSON input below. Each new completion contains only the authoritative final assistant reply from one completed task turn. Summarize only what those assistant_final fields reported: the user-visible result, still-relevant next work, and explicit decisions. Do not invent or reconstruct user messages, tool calls, intermediate progress, tests, logs, hidden reasoning, or implementation details that are not useful to the user. For every new completion, source_evidence must contain exactly one item in the same order: copy completion_id and copy required_evidence_quote exactly into exact_quote. source_evidence is private audit metadata, not narration: do not paste required_evidence_quote into spoken_text merely to satisfy validation. When previous_unheard is present, it is required cumulative context: preserve its facts, pending, and decisions in the matching output arrays, then compress and naturally re-summarize only the still-relevant old unread content together with every new completion. Do not copy previous spoken_text verbatim and do not narrate a chronological history. Write spoken_text as a natural Simplified Chinese briefing of at most 480 letters, digits, or Han characters. Match its length to the actual information: keep a trivial confirmation to one short sentence; for an ordinary result, retain only the most important conclusion, core numbers, limitations, decisions, and any action the user truly needs; use more length for cumulative unread material only when needed to preserve useful meaning. Never pad toward a target length or paraphrase the whole source. Lead immediately with the newest concrete user-visible result, prioritizing the last new completion, then briefly fold in other material unread outcomes or decisions. End with a next action only when the source contains a real actionable next step; never add a generic closing such as saying work can continue. It must be self-contained and say what was actually completed, what result matters, and any relevant next step or decision; do not merely say that a task is done. Omit test commands, validation mechanics, and implementation detail unless the user must act on them. The TTS reads spoken_text exactly, so never include schema labels, evidence excerpts, validation notes, section headings, or boilerplate that a person should not hear. Return only the output-schema JSON. covers_new_completions must exactly equal the ordered completion_id values in new_completions. Never emit credentials, hidden reasoning, or local absolute paths.\n";
+    const INSTRUCTIONS: &[u8] = b"Create a concrete cumulative unread task summary from the JSON input below. Each new completion contains only the authoritative final assistant reply from one completed task turn. Summarize only what those assistant_final fields reported: the user-visible result, still-relevant next work, and explicit decisions. Do not invent or reconstruct user messages, tool calls, intermediate progress, tests, logs, hidden reasoning, or implementation details that are not useful to the user. When previous_unheard is present, use it as cumulative context, then naturally re-summarize the still-relevant old unread content together with every new completion. Do not copy previous spoken_text verbatim and do not narrate a chronological history. Write spoken_text as a natural Simplified Chinese briefing of at most 480 letters, digits, or Han characters. Match its length to the actual information: keep a trivial confirmation to one short sentence; for an ordinary result, retain only the most important conclusion, core numbers, limitations, decisions, and any action the user truly needs; use more length for cumulative unread material only when needed to preserve useful meaning. Never pad toward a target length or paraphrase the whole source. Lead immediately with the newest concrete user-visible result, prioritizing the last new completion, then briefly fold in other material unread outcomes or decisions. End with a next action only when the source contains a real actionable next step; never add a generic closing such as saying work can continue. It must be self-contained and say what was actually completed, what result matters, and any relevant next step or decision; do not merely say that a task is done. Omit test commands, validation mechanics, and implementation detail unless the user must act on them. The TTS reads spoken_text exactly, so never include schema labels, validation notes, section headings, or boilerplate that a person should not hear. Return only the output-schema JSON. covers_new_completions must exactly equal the ordered completion_id values in new_completions. Never emit credentials, hidden reasoning, or local absolute paths.\n";
     let completions = assistant_completions(claim)?;
     let mut prompt = BoundedSensitiveWriter::new(MAX_PROMPT_BYTES);
     prompt
@@ -651,7 +647,6 @@ fn valid_assistant_turn_pack(completion: &PendingSummaryCompletion) -> bool {
 }
 
 fn assistant_completions(claim: &SummaryClaim) -> Result<Vec<AssistantCompletion<'_>>, SparkError> {
-    let quote_budget = source_evidence_quote_budget(claim.completions.len());
     claim
         .completions
         .iter()
@@ -665,13 +660,9 @@ fn assistant_completions(claim: &SummaryClaim) -> Result<Vec<AssistantCompletion
                 return Err(SparkError::InvalidInput);
             }
             let assistant_final = pack.assistant.into_iter().next().unwrap();
-            let required_evidence_quote =
-                required_source_evidence_quote(&assistant_final, quote_budget)
-                    .ok_or(SparkError::InvalidInput)?;
             Ok(AssistantCompletion {
                 completion_id: &completion.completion_id,
                 assistant_final,
-                required_evidence_quote,
             })
         })
         .collect()
@@ -1102,19 +1093,6 @@ fn output_schema() -> String {
             "pending": {"type": "array", "maxItems": 32, "items": {"type": "string"}},
             "decisions": {"type": "array", "maxItems": 32, "items": {"type": "string"}},
             "spoken_text": {"type": "string"},
-            "source_evidence": {
-                "type": "array",
-                "maxItems": 32,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "completion_id": {"type": "string"},
-                        "exact_quote": {"type": "string"}
-                    },
-                    "required": ["completion_id", "exact_quote"]
-                }
-            },
             "covers_new_completions": {
                 "type": "array",
                 "maxItems": 32,
@@ -1122,8 +1100,7 @@ fn output_schema() -> String {
             }
         },
         "required": [
-            "schema", "facts", "pending", "decisions", "spoken_text", "source_evidence",
-            "covers_new_completions"
+            "schema", "facts", "pending", "decisions", "spoken_text", "covers_new_completions"
         ]
     })
     .to_string()
@@ -2466,12 +2443,12 @@ mod tests {
         let prompt = build_prompt(&claim(), None).unwrap();
         let prompt = std::str::from_utf8(prompt.as_slice()).unwrap();
         assert!(prompt.contains("natural Simplified Chinese"));
-        assert!(prompt.contains("required cumulative context"));
+        assert!(prompt.contains("use it as cumulative context"));
         assert!(prompt.contains("Do not copy previous spoken_text verbatim"));
         assert!(prompt.contains("authoritative final assistant reply"));
         assert!(prompt.contains("final assistant result"));
-        assert!(prompt.contains("required_evidence_quote"));
-        assert!(prompt.contains("private audit metadata, not narration"));
+        assert!(!prompt.contains("required_evidence_quote"));
+        assert!(!prompt.contains("source_evidence"));
         assert!(prompt.contains("TTS reads spoken_text exactly"));
         assert!(prompt.contains("Lead immediately with the newest concrete user-visible result"));
         assert!(prompt.contains("prioritizing the last new completion"));

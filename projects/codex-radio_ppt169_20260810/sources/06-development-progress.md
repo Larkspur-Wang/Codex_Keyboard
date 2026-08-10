@@ -1,5 +1,15 @@
 # 进展日志（新的放最上面）
 
+## 2026-08-10 · 本地版训练营分享候选收口 · Codex
+
+- 真机完成 S1-S4 四路并发，最右活动灯达到红色；任务完成后回到空闲状态，四槽分别生成未读信箱。
+- 修复连续 PTT 的偶发问题：Codex live catalog 变化时有界重试，已认证上行音频少量 UDP 缺帧时补
+  静音继续 ASR，不再让整段语音或第四槽无声丢失。
+- 删除会阻断可用 Luna 输出的内容评分门禁。Host 只保留结构、completion 归属、尺寸、脱敏、事务和
+  有效 TTS 等运行底线；总结正文仍由 `gpt-5.6-luna` high 一次生成。
+- 当前 App 显示北京区 `qwen3-asr-flash`、`qwen-audio-3.0-tts-flash`、`longanfengyue`；固件已具备
+  第五灯绿黄橙紫红、板载十档音量和短按音量播报。
+
 ## 2026-08-10 · 优化 Spark 总结顺序与 Qwen TTS 听感 · Codex
 
 - 总结内容：只调整 Spark prompt，不向 `spoken_text` 塞入固定正文。新播报立即以最后一条

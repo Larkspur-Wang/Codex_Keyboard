@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  presentDashboardFailure,
   presentProbe,
   presentSlotStatus,
   sortedTasks,
@@ -43,6 +44,19 @@ describe("desktop Host health view", () => {
 });
 
 describe("desktop four-slot dashboard", () => {
+  it("clears stale provider details and distinguishes protocol failures", () => {
+    expect(presentDashboardFailure("protocol_error")).toEqual({
+      taskCount: "状态不可用",
+      providerState: "Host 响应异常",
+      asrModel: "--",
+      ttsModel: "--",
+      voice: "--",
+    });
+    expect(presentDashboardFailure("offline").providerState).toBe(
+      "Host 不可达",
+    );
+  });
+
   it("shows queue and retained unread coverage without exposing task IDs", () => {
     expect(
       presentSlotStatus({

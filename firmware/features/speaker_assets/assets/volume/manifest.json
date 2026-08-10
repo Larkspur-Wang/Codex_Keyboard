@@ -1,0 +1,102 @@
+[
+  {
+    "level": 1,
+    "text": "当前音量百分之10。",
+    "model": "qwen-audio-3.0-tts-flash",
+    "voice": "longanfengyue",
+    "sample_rate": 48000,
+    "samples": 89780,
+    "encoded_bytes": 46038,
+    "sha256": "a8a0447d970cf7abb4cb274967fd9b43aa21e177e7644c9bf66e3bd6b32d8ff1"
+  },
+  {
+    "level": 2,
+    "text": "当前音量百分之20。",
+    "model": "qwen-audio-3.0-tts-flash",
+    "voice": "longanfengyue",
+    "sample_rate": 48000,
+    "samples": 101080,
+    "encoded_bytes": 51826,
+    "sha256": "f5a2d346c460133607a0c3242c76040aecb3cdc34ba21e6a24b2292b2487ac55"
+  },
+  {
+    "level": 3,
+    "text": "当前音量百分之30。",
+    "model": "qwen-audio-3.0-tts-flash",
+    "voice": "longanfengyue",
+    "sample_rate": 48000,
+    "samples": 108540,
+    "encoded_bytes": 55652,
+    "sha256": "ab7f8745437bc2768e5aa00b1a2a329dd832c640d939ac330adac493623ffbbc"
+  },
+  {
+    "level": 4,
+    "text": "当前音量百分之40。",
+    "model": "qwen-audio-3.0-tts-flash",
+    "voice": "longanfengyue",
+    "sample_rate": 48000,
+    "samples": 108540,
+    "encoded_bytes": 55652,
+    "sha256": "54265e3bce443aa56782577fb98935c0451d514392be75677ea848da5e45fbb1"
+  },
+  {
+    "level": 5,
+    "text": "当前音量百分之50。",
+    "model": "qwen-audio-3.0-tts-flash",
+    "voice": "longanfengyue",
+    "sample_rate": 48000,
+    "samples": 111960,
+    "encoded_bytes": 57404,
+    "sha256": "e89cb132083dae18a8d83baa2d79cafe50fec2e2068185d49af581553820ff4b"
+  },
+  {
+    "level": 6,
+    "text": "当前音量百分之60。",
+    "model": "qwen-audio-3.0-tts-flash",
+    "voice": "longanfengyue",
+    "sample_rate": 48000,
+    "samples": 101080,
+    "encoded_bytes": 51826,
+    "sha256": "6191604871c79a68bdbe049c2d9f25154817651ddf64bc30eae85e8e8f004375"
+  },
+  {
+    "level": 7,
+    "text": "当前音量百分之70。",
+    "model": "qwen-audio-3.0-tts-flash",
+    "voice": "longanfengyue",
+    "sample_rate": 48000,
+    "samples": 108540,
+    "encoded_bytes": 55652,
+    "sha256": "1d0ca6d6dc3524bc8128132e9df2045c56a60fb8ab891986c1022ce337e5b80e"
+  },
+  {
+    "level": 8,
+    "text": "当前音量百分之80。",
+    "model": "qwen-audio-3.0-tts-flash",
+    "voice": "longanfengyue",
+    "sample_rate": 48000,
+    "samples": 97020,
+    "encoded_bytes": 49748,
+    "sha256": "c640eb3138127db14f9524249ea847f7b8ea683ab8d6dca9e1bde73dca7ff071"
+  },
+  {
+    "level": 9,
+    "text": "当前音量百分之90。",
+    "model": "qwen-audio-3.0-tts-flash",
+    "voice": "longanfengyue",
+    "sample_rate": 48000,
+    "samples": 101080,
+    "encoded_bytes": 51826,
+    "sha256": "94ed00de871101ce75adf68bb1959868341c095b651d8a2b6cd68d3f422b1d5c"
+  },
+  {
+    "level": 10,
+    "text": "当前音量百分之100。",
+    "model": "qwen-audio-3.0-tts-flash",
+    "voice": "longanfengyue",
+    "sample_rate": 48000,
+    "samples": 93400,
+    "encoded_bytes": 47890,
+    "sha256": "c5a72ff4c21be8a32c606f1a379b84af1266f73582b1deda2de6568ba713bbb7"
+  }
+]

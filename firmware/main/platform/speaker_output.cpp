@@ -389,6 +389,18 @@ bool SpeakerOutput::ready() const {
          !shutdown_requested_.load(std::memory_order_acquire);
 }
 
+void SpeakerOutput::set_volume_level(std::uint8_t level) {
+  const auto bounded = std::clamp<std::uint8_t>(
+      level,
+      ai_keyboard::kSpeakerVolumeMinimum,
+      ai_keyboard::kSpeakerVolumeMaximum);
+  volume_level_.store(bounded, std::memory_order_release);
+}
+
+std::uint8_t SpeakerOutput::volume_level() const {
+  return volume_level_.load(std::memory_order_acquire);
+}
+
 bool SpeakerOutput::request_diagnostic_tone() {
   if (!ready() || worker_task_ == nullptr || tx_channel_ == nullptr) {
     const auto current_generation = probe_snapshot().generation;
@@ -1807,10 +1819,16 @@ esp_err_t SpeakerOutput::preload_zero_dma(const std::int16_t* samples,
   return bytes_loaded == expected_bytes ? ESP_OK : ESP_ERR_INVALID_SIZE;
 }
 
-esp_err_t SpeakerOutput::write_samples(const std::int16_t* samples,
+esp_err_t SpeakerOutput::write_samples(std::int16_t* samples,
                                        std::size_t sample_count) {
   if (samples == nullptr || sample_count == 0) {
     return ESP_ERR_INVALID_ARG;
+  }
+  const auto level = volume_level_.load(std::memory_order_acquire);
+  if (level != ai_keyboard::kSpeakerVolumeMaximum) {
+    for (std::size_t index = 0; index < sample_count; ++index) {
+      samples[index] = ai_keyboard::scale_speaker_sample(samples[index], level);
+    }
   }
   const auto* bytes = reinterpret_cast<const std::uint8_t*>(samples);
   const auto total_bytes = sample_count * sizeof(samples[0]);

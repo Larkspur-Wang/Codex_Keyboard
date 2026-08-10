@@ -2,17 +2,12 @@ use thiserror::Error;
 
 use crate::cache::{CacheError, CacheStore};
 use crate::dashscope::{DashScopeTtsClient, TtsAudio, TtsError, TtsRequest};
-use crate::rollout_observer::TurnPack;
 use crate::secrets::{KeychainAccounts, SecretStore};
 use crate::spark_runner::{SparkError, SparkRunner};
 use crate::store::{
     StateStore, StoreError, SummaryClaim, SummaryClaimResult, SummaryTtsAttemptState, UnreadSummary,
 };
-use crate::summary::{
-    SummaryDocument, SummaryDocumentError, contains_han_text, incorporates_new_completion,
-    meaningful_for_speech, preserves_previous_unheard, required_source_evidence_quote,
-    source_evidence_quote_budget,
-};
+use crate::summary::{SummaryDocument, SummaryDocumentError};
 use crate::tts_cache::{
     PublishedTtsGeneration, TtsCacheError, load_tts_generation_with, load_tts_summary,
     publish_tts_generation_with,
@@ -217,7 +212,7 @@ where
         };
         observer.reached(SummaryCheckpoint::PreviousUnreadLoaded);
 
-        let mut summary = match self.generator.generate(&claim, previous.as_ref()) {
+        let summary = match self.generator.generate(&claim, previous.as_ref()) {
             Ok(summary) => summary,
             Err(error) => {
                 self.abandon(&claim)?;
@@ -232,37 +227,6 @@ where
         if let Err(error) = summary.validate_expected_covers(&expected) {
             self.abandon(&claim)?;
             return Err(error.into());
-        }
-        if !contains_han_text(&summary.spoken_text)
-            || !meaningful_for_speech(&summary)
-            || !preserves_previous_unheard(previous.as_ref(), &summary)
-            || !incorporates_new_completion(previous.as_ref(), &summary)
-            || validate_claim_source_evidence(&claim, &summary).is_err()
-        {
-            eprintln!(
-                "summary=spoken_text_quality_retry generation={}",
-                claim.generation
-            );
-            summary = match self.generator.generate(&claim, previous.as_ref()) {
-                Ok(summary) => summary,
-                Err(error) => {
-                    self.abandon(&claim)?;
-                    return Err(error.into());
-                }
-            };
-            if let Err(error) = summary.validate_expected_covers(&expected) {
-                self.abandon(&claim)?;
-                return Err(error.into());
-            }
-            if !contains_han_text(&summary.spoken_text)
-                || !meaningful_for_speech(&summary)
-                || !preserves_previous_unheard(previous.as_ref(), &summary)
-                || !incorporates_new_completion(previous.as_ref(), &summary)
-                || validate_claim_source_evidence(&claim, &summary).is_err()
-            {
-                self.abandon(&claim)?;
-                return Err(SummaryDocumentError::Text.into());
-            }
         }
         observer.reached(SummaryCheckpoint::SparkGenerated);
 
@@ -366,8 +330,6 @@ where
                     .summary
                     .validate_expected_covers(&expected)
                     .map_err(RecoveryCommitError::Summary)?;
-                validate_claim_source_evidence(claim, &cached.summary)
-                    .map_err(RecoveryCommitError::Summary)?;
                 observer.reached(SummaryCheckpoint::CacheAuthenticated);
                 self.store
                     .publish_summary(claim, &cached.publication.cache_reference)
@@ -399,46 +361,6 @@ where
     }
 }
 
-fn validate_claim_source_evidence(
-    claim: &SummaryClaim,
-    summary: &SummaryDocument,
-) -> Result<(), SummaryDocumentError> {
-    let quote_budget = source_evidence_quote_budget(claim.completions.len());
-    let sources = claim
-        .completions
-        .iter()
-        .map(|completion| {
-            let pack: TurnPack = serde_json::from_str(&completion.turn_pack)
-                .map_err(|_| SummaryDocumentError::Evidence)?;
-            if pack.v != 1 || pack.turn_id != completion.completion_id {
-                return Err(SummaryDocumentError::Evidence);
-            }
-            if pack.assistant.len() != 1 || pack.assistant[0].trim().is_empty() {
-                return Err(SummaryDocumentError::Evidence);
-            }
-            let assistant_final = &pack.assistant[0];
-            let required_quote = required_source_evidence_quote(assistant_final, quote_budget)
-                .ok_or(SummaryDocumentError::Evidence)?;
-            Ok((
-                completion.completion_id.clone(),
-                assistant_final.clone(),
-                required_quote,
-            ))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let source_refs = sources
-        .iter()
-        .map(|(completion_id, assistant_final, required_quote)| {
-            (
-                completion_id.as_str(),
-                assistant_final.as_str(),
-                required_quote.as_str(),
-            )
-        })
-        .collect::<Vec<_>>();
-    summary.validate_source_evidence(&source_refs)
-}
-
 enum RecoveryCommitError {
     Store(StoreError),
     Summary(SummaryDocumentError),
@@ -455,7 +377,7 @@ mod tests {
     use crate::cache::{CacheId, CacheLimits};
     use crate::dashscope::{TTS_MODEL, TtsReceipt};
     use crate::store::{RolloutCursor, SummaryClaimOutcome};
-    use crate::summary::{SUMMARY_SCHEMA_VERSION, SummarySourceEvidence};
+    use crate::summary::SUMMARY_SCHEMA_VERSION;
 
     const TASK: &str = "019fa972-5cfa-75e1-9008-0b17ade9a347";
     const FIRST: &str = "019fa972-5cfa-75e1-9008-0b17ade9a348";
@@ -473,41 +395,9 @@ mod tests {
         assert!(SUMMARY_TTS_INSTRUCTIONS.contains("不朗读标点和格式符号"));
     }
 
-    fn source_evidence(claim: &SummaryClaim) -> Vec<SummarySourceEvidence> {
-        claim
-            .completions
-            .iter()
-            .map(|completion| SummarySourceEvidence {
-                completion_id: completion.completion_id.clone(),
-                exact_quote: SOURCE_QUOTE.into(),
-            })
-            .collect()
-    }
-
     struct FakeGenerator {
         calls: Arc<AtomicUsize>,
         previous_facts: Arc<Mutex<Vec<usize>>>,
-    }
-
-    struct LanguageRepairGenerator {
-        calls: Arc<AtomicUsize>,
-        repair_succeeds: bool,
-    }
-
-    struct DropsPreviousGenerator {
-        calls: Arc<AtomicUsize>,
-    }
-
-    struct GenericWithoutEvidenceGenerator {
-        calls: Arc<AtomicUsize>,
-    }
-
-    struct GenericWithWeakEvidenceGenerator {
-        calls: Arc<AtomicUsize>,
-    }
-
-    struct ReplaysPreviousGenerator {
-        calls: Arc<AtomicUsize>,
     }
 
     impl SummaryGenerator for FakeGenerator {
@@ -558,85 +448,6 @@ mod tests {
                 spoken_text: previous_unheard.map_or(current_spoken.clone(), |document| {
                     format!("{} {}", document.spoken_text, current_spoken)
                 }),
-                source_evidence: source_evidence(claim),
-                covers_new_completions: claim
-                    .completions
-                    .iter()
-                    .map(|completion| completion.completion_id.clone())
-                    .collect(),
-            })
-        }
-    }
-
-    impl SummaryGenerator for LanguageRepairGenerator {
-        fn generate(
-            &self,
-            claim: &SummaryClaim,
-            _previous_unheard: Option<&SummaryDocument>,
-        ) -> Result<SummaryDocument, SparkError> {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(SummaryDocument {
-                schema: SUMMARY_SCHEMA_VERSION,
-                facts: vec!["已经完成本地语音信箱状态同步".into(), SOURCE_QUOTE.into()],
-                pending: Vec::new(),
-                decisions: Vec::new(),
-                spoken_text: if call > 0 && self.repair_succeeds {
-                    format!(
-                        "已经完成本地语音信箱状态同步。任务已经完成，{}，具体结果和后续工作都已整理，可以播放。",
-                        SOURCE_QUOTE,
-                    )
-                } else {
-                    "The task is complete and ready to play.".into()
-                },
-                source_evidence: source_evidence(claim),
-                covers_new_completions: claim
-                    .completions
-                    .iter()
-                    .map(|completion| completion.completion_id.clone())
-                    .collect(),
-            })
-        }
-    }
-
-    impl SummaryGenerator for DropsPreviousGenerator {
-        fn generate(
-            &self,
-            claim: &SummaryClaim,
-            _previous_unheard: Option<&SummaryDocument>,
-        ) -> Result<SummaryDocument, SparkError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(SummaryDocument {
-                schema: SUMMARY_SCHEMA_VERSION,
-                facts: vec!["新完成事项已经通过真机验证".into(), SOURCE_QUOTE.into()],
-                pending: Vec::new(),
-                decisions: Vec::new(),
-                spoken_text: format!(
-                    "新完成事项已经通过真机验证，{}，旧信箱内容没有保留。",
-                    SOURCE_QUOTE
-                ),
-                source_evidence: source_evidence(claim),
-                covers_new_completions: claim
-                    .completions
-                    .iter()
-                    .map(|completion| completion.completion_id.clone())
-                    .collect(),
-            })
-        }
-    }
-
-    impl SummaryGenerator for GenericWithoutEvidenceGenerator {
-        fn generate(
-            &self,
-            claim: &SummaryClaim,
-            _previous_unheard: Option<&SummaryDocument>,
-        ) -> Result<SummaryDocument, SparkError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(SummaryDocument {
-                schema: SUMMARY_SCHEMA_VERSION,
-                facts: vec!["任务已经顺利完成没有其他问题".into()],
-                pending: Vec::new(),
-                decisions: Vec::new(),
-                spoken_text: "任务已经顺利完成，没有其他问题，可以继续后续工作。".into(),
                 source_evidence: Vec::new(),
                 covers_new_completions: claim
                     .completions
@@ -644,57 +455,6 @@ mod tests {
                     .map(|completion| completion.completion_id.clone())
                     .collect(),
             })
-        }
-    }
-
-    impl SummaryGenerator for GenericWithWeakEvidenceGenerator {
-        fn generate(
-            &self,
-            claim: &SummaryClaim,
-            _previous_unheard: Option<&SummaryDocument>,
-        ) -> Result<SummaryDocument, SparkError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(SummaryDocument {
-                schema: SUMMARY_SCHEMA_VERSION,
-                facts: vec![GENERIC_SOURCE_QUOTE.into()],
-                pending: Vec::new(),
-                decisions: Vec::new(),
-                spoken_text: format!(
-                    "任务已经顺利完成，{}，可以继续后续工作。",
-                    GENERIC_SOURCE_QUOTE
-                ),
-                source_evidence: claim
-                    .completions
-                    .iter()
-                    .map(|completion| SummarySourceEvidence {
-                        completion_id: completion.completion_id.clone(),
-                        exact_quote: GENERIC_SOURCE_QUOTE.into(),
-                    })
-                    .collect(),
-                covers_new_completions: claim
-                    .completions
-                    .iter()
-                    .map(|completion| completion.completion_id.clone())
-                    .collect(),
-            })
-        }
-    }
-
-    impl SummaryGenerator for ReplaysPreviousGenerator {
-        fn generate(
-            &self,
-            claim: &SummaryClaim,
-            previous_unheard: Option<&SummaryDocument>,
-        ) -> Result<SummaryDocument, SparkError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            let mut replay = previous_unheard.cloned().ok_or(SparkError::InvalidInput)?;
-            replay.source_evidence = source_evidence(claim);
-            replay.covers_new_completions = claim
-                .completions
-                .iter()
-                .map(|completion| completion.completion_id.clone())
-                .collect();
-            Ok(replay)
         }
     }
 
@@ -850,161 +610,6 @@ mod tests {
         assert_eq!(store.pending_summary_completion_count(TASK).unwrap(), 0);
         let summary = load_tts_summary(&cache, TASK, 2).unwrap();
         assert_eq!(summary.facts.len(), 3);
-    }
-
-    #[test]
-    fn non_chinese_spoken_text_gets_one_bounded_repair_before_tts() {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut store = StateStore::open(&temporary.path().join("state.sqlite3")).unwrap();
-        let cache = open_cache(&temporary.path().join("cache"));
-        insert_completion(&mut store, FIRST, 1);
-        let generator = LanguageRepairGenerator {
-            calls: Arc::new(AtomicUsize::new(0)),
-            repair_succeeds: true,
-        };
-        let tts = synthesizer(FakeTtsMode::Success);
-
-        let outcome = SummaryOrchestrator::new(&mut store, &cache, &generator, &tts)
-            .run(TASK, "language-repair")
-            .unwrap();
-
-        assert!(matches!(outcome, SummaryRunOutcome::Published { .. }));
-        assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(tts.calls.load(Ordering::SeqCst), 1);
-        assert!(contains_han_text(
-            &load_tts_summary(&cache, TASK, 1).unwrap().spoken_text
-        ));
-    }
-
-    #[test]
-    fn repeated_non_chinese_spoken_text_never_reaches_tts() {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut store = StateStore::open(&temporary.path().join("state.sqlite3")).unwrap();
-        let cache = open_cache(&temporary.path().join("cache"));
-        insert_completion(&mut store, FIRST, 1);
-        let generator = LanguageRepairGenerator {
-            calls: Arc::new(AtomicUsize::new(0)),
-            repair_succeeds: false,
-        };
-        let tts = synthesizer(FakeTtsMode::Success);
-
-        let error = SummaryOrchestrator::new(&mut store, &cache, &generator, &tts)
-            .run(TASK, "language-reject")
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            SummaryOrchestratorError::Summary(SummaryDocumentError::Text)
-        ));
-        assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(tts.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.pending_summary_completion_count(TASK).unwrap(), 1);
-    }
-
-    #[test]
-    fn first_generation_generic_summary_without_exact_source_evidence_is_rejected() {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut store = StateStore::open(&temporary.path().join("state.sqlite3")).unwrap();
-        let cache = open_cache(&temporary.path().join("cache"));
-        insert_completion(&mut store, FIRST, 1);
-        let generator = GenericWithoutEvidenceGenerator {
-            calls: Arc::new(AtomicUsize::new(0)),
-        };
-        let tts = synthesizer(FakeTtsMode::Success);
-
-        let error = SummaryOrchestrator::new(&mut store, &cache, &generator, &tts)
-            .run(TASK, "generic-first-generation")
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            SummaryOrchestratorError::Summary(SummaryDocumentError::Text)
-        ));
-        assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(tts.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.pending_summary_completion_count(TASK).unwrap(), 1);
-        assert!(store.current_unread_summary(TASK).unwrap().is_none());
-    }
-
-    #[test]
-    fn first_generation_generic_summary_cannot_select_a_weak_source_quote() {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut store = StateStore::open(&temporary.path().join("state.sqlite3")).unwrap();
-        let cache = open_cache(&temporary.path().join("cache"));
-        insert_completion(&mut store, FIRST, 1);
-        let generator = GenericWithWeakEvidenceGenerator {
-            calls: Arc::new(AtomicUsize::new(0)),
-        };
-        let tts = synthesizer(FakeTtsMode::Success);
-
-        let error = SummaryOrchestrator::new(&mut store, &cache, &generator, &tts)
-            .run(TASK, "generic-weak-evidence")
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            SummaryOrchestratorError::Summary(SummaryDocumentError::Text)
-        ));
-        assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(tts.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.pending_summary_completion_count(TASK).unwrap(), 1);
-        assert!(store.current_unread_summary(TASK).unwrap().is_none());
-    }
-
-    #[test]
-    fn repeated_previous_unheard_omission_keeps_old_generation_and_skips_tts() {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut store = StateStore::open(&temporary.path().join("state.sqlite3")).unwrap();
-        let cache = open_cache(&temporary.path().join("cache"));
-        insert_completion(&mut store, FIRST, 1);
-        run_success(&mut store, &cache, "request-1");
-        let old = store.current_unread_summary(TASK).unwrap().unwrap();
-        insert_completion(&mut store, SECOND, 2);
-        let generator = DropsPreviousGenerator {
-            calls: Arc::new(AtomicUsize::new(0)),
-        };
-        let tts = synthesizer(FakeTtsMode::Success);
-
-        let error = SummaryOrchestrator::new(&mut store, &cache, &generator, &tts)
-            .run(TASK, "drop-previous")
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            SummaryOrchestratorError::Summary(SummaryDocumentError::Text)
-        ));
-        assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(tts.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.current_unread_summary(TASK).unwrap(), Some(old));
-        assert_eq!(store.pending_summary_completion_count(TASK).unwrap(), 1);
-    }
-
-    #[test]
-    fn unchanged_previous_replay_cannot_consume_a_new_completion() {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut store = StateStore::open(&temporary.path().join("state.sqlite3")).unwrap();
-        let cache = open_cache(&temporary.path().join("cache"));
-        insert_completion(&mut store, FIRST, 1);
-        run_success(&mut store, &cache, "request-1");
-        let old = store.current_unread_summary(TASK).unwrap().unwrap();
-        insert_completion(&mut store, SECOND, 2);
-        let generator = ReplaysPreviousGenerator {
-            calls: Arc::new(AtomicUsize::new(0)),
-        };
-        let tts = synthesizer(FakeTtsMode::Success);
-
-        let error = SummaryOrchestrator::new(&mut store, &cache, &generator, &tts)
-            .run(TASK, "replay-previous")
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            SummaryOrchestratorError::Summary(SummaryDocumentError::Text)
-        ));
-        assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(tts.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.current_unread_summary(TASK).unwrap(), Some(old));
-        assert_eq!(store.pending_summary_completion_count(TASK).unwrap(), 1);
     }
 
     #[test]

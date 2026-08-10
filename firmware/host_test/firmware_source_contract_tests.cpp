@@ -1745,7 +1745,7 @@ void peripheral_power_lifecycle_is_system_owned_and_ordered() {
   const auto deep_sleep = section(
       app_main,
       "void maybe_enter_deep_sleep(",
-      "std::int8_t wheel_chunk(");
+      "void show_encoder_volume_feedback(");
   const auto wake_setup =
       deep_sleep.find("esp_sleep_enable_ext1_wakeup_io(");
   const auto audio_gate =
@@ -1807,7 +1807,7 @@ void peripheral_power_lifecycle_is_system_owned_and_ordered() {
   assert(power_down.find("ready_ = false") < safe_outputs);
   assert(power_down.find("DeviceAwake", rail_low) == std::string::npos);
 
-  assert(app_main.find("0.6.0-easy-codex-task-activity") !=
+  assert(app_main.find("0.6.2-easy-codex-board-volume") !=
          std::string::npos);
 }
 

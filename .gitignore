@@ -34,3 +34,8 @@ evidence/private/
 .playwright-cli/
 tools/**/.build/
 tools/**/.swiftpm/
+
+# PPT Master generated intermediates
+projects/*/svg_final/
+projects/*/validation/rendered-*/
+svg_quality_report.txt

@@ -36,6 +36,9 @@ const AUDIO_FRAME_BYTES: usize = AUDIO_FRAME_SAMPLES * 2;
 const AUDIO_SAMPLE_RATE: u32 = 16_000;
 const MAX_CAPTURE_BYTES: usize = AUDIO_SAMPLE_RATE as usize * 2 * 90;
 const MIN_CAPTURE_FRAMES: u32 = 10;
+// EIAU runs over UDP and deliberately has no per-frame ACK. Losing a few
+// 20 ms frames must not discard an otherwise usable voice command.
+const MAX_CAPTURE_GAP_FRAMES: u32 = 10;
 const MAX_ACTIVE_CAPTURES: usize = 4;
 const MAX_RETIRED_SESSIONS: usize = 128;
 const CAPTURE_ABORT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -995,7 +998,7 @@ impl CaptureAssembler {
             return Ok(());
         }
         if !self.active.contains_key(&frame.session_id) {
-            if frame.sequence != 0 {
+            if frame.sequence > MAX_CAPTURE_GAP_FRAMES {
                 self.retire(frame.session_id);
                 return Err(LanVoiceError::InvalidSequence);
             }
@@ -1023,7 +1026,6 @@ impl CaptureAssembler {
             .ok_or(LanVoiceError::InvalidSession)?;
         if capture.source != source
             || capture.identity != frame.identity
-            || frame.sequence != capture.next_sequence
             || capture
                 .final_sequence
                 .is_some_and(|final_sequence| frame.sequence >= final_sequence)
@@ -1032,10 +1034,30 @@ impl CaptureAssembler {
             self.retire(frame.session_id);
             return Err(LanVoiceError::InvalidSequence);
         }
-        if capture.pcm.len().saturating_add(frame.payload.len()) > MAX_CAPTURE_BYTES {
+        if frame.sequence < capture.next_sequence {
+            capture.last_frame_at = now;
+            return Ok(());
+        }
+        let missing_frames = frame.sequence - capture.next_sequence;
+        if missing_frames > MAX_CAPTURE_GAP_FRAMES {
+            self.active.remove(&frame.session_id);
+            self.retire(frame.session_id);
+            return Err(LanVoiceError::InvalidSequence);
+        }
+        let missing_bytes = missing_frames as usize * AUDIO_FRAME_BYTES;
+        let added_bytes = missing_bytes.saturating_add(frame.payload.len());
+        if capture.pcm.len().saturating_add(added_bytes) > MAX_CAPTURE_BYTES {
             self.active.remove(&frame.session_id);
             self.retire(frame.session_id);
             return Err(LanVoiceError::CaptureLimit);
+        }
+        if missing_frames > 0 {
+            eprintln!(
+                "lan_voice_gap_filled slot={} frames={missing_frames}",
+                capture.identity.slot
+            );
+            capture.pcm.resize(capture.pcm.len() + missing_bytes, 0);
+            capture.next_sequence = frame.sequence;
         }
         capture.pcm.extend_from_slice(frame.payload);
         capture.next_sequence = capture.next_sequence.saturating_add(1);
@@ -1078,6 +1100,23 @@ impl CaptureAssembler {
                 self.retire(terminal.session_id);
                 Err(LanVoiceError::InvalidSequence)
             };
+        }
+        let missing_frames = terminal.final_sequence - capture.next_sequence;
+        if missing_frames > MAX_CAPTURE_GAP_FRAMES {
+            self.active.remove(&terminal.session_id);
+            self.retire(terminal.session_id);
+            return Err(LanVoiceError::InvalidSequence);
+        }
+        if missing_frames > 0 {
+            eprintln!(
+                "lan_voice_gap_filled slot={} frames={missing_frames}",
+                capture.identity.slot
+            );
+            capture.pcm.resize(
+                capture.pcm.len() + missing_frames as usize * AUDIO_FRAME_BYTES,
+                0,
+            );
+            capture.next_sequence = terminal.final_sequence;
         }
         capture.final_sequence = Some(terminal.final_sequence);
         capture.last_frame_at = now;
@@ -1586,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_end_before_delayed_tail_is_idempotent() {
+    fn authenticated_end_silence_fills_a_small_missing_tail_and_retires_replays() {
         let mut assembler = CaptureAssembler::new(Some(TEST_AUTH_KEY));
         let now = Instant::now();
         let source = "127.0.0.1:40000".parse().unwrap();
@@ -1599,7 +1638,16 @@ mod tests {
         let terminal = end_packet(session_id, MIN_CAPTURE_FRAMES);
         assembler.ingest(&terminal, source, now).unwrap();
         assembler.ingest(&terminal, source, now).unwrap();
-        assert!(assembler.take_ready().is_empty());
+        let completed = assembler.take_ready().remove(0).unwrap();
+        assert_eq!(
+            completed.pcm.len(),
+            MIN_CAPTURE_FRAMES as usize * AUDIO_FRAME_BYTES
+        );
+        assert!(
+            completed.pcm[(MIN_CAPTURE_FRAMES as usize - 1) * AUDIO_FRAME_BYTES..]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
         assembler
             .ingest(
                 &packet(session_id, MIN_CAPTURE_FRAMES - 1, 0x7F),
@@ -1607,26 +1655,51 @@ mod tests {
                 now,
             )
             .unwrap();
-        let completed = assembler.take_ready().remove(0).unwrap();
-        assert_eq!(completed.identity.slot, 3);
-        assert_eq!(
-            completed.pcm.len(),
-            MIN_CAPTURE_FRAMES as usize * AUDIO_FRAME_BYTES
-        );
+        assert!(assembler.take_ready().is_empty());
     }
 
     #[test]
-    fn gaps_wrong_sources_and_malformed_frames_fail_closed() {
+    fn bounded_udp_loss_is_silence_filled_but_large_gaps_fail_closed() {
         let mut assembler = CaptureAssembler::new(Some(TEST_AUTH_KEY));
         let now = Instant::now();
         let first = "127.0.0.1:40000".parse().unwrap();
         let second = "127.0.0.1:40001".parse().unwrap();
         let gap = session(1, 1, 1);
+        assembler.ingest(&packet(gap, 1, 0x11), first, now).unwrap();
+        for sequence in 2..MIN_CAPTURE_FRAMES - 1 {
+            assembler
+                .ingest(&packet(gap, sequence, 0x22), first, now)
+                .unwrap();
+        }
+        assembler
+            .ingest(&end_packet(gap, MIN_CAPTURE_FRAMES), first, now)
+            .unwrap();
+        let completed = assembler.take_ready().remove(0).unwrap();
+        assert_eq!(
+            completed.pcm.len(),
+            MIN_CAPTURE_FRAMES as usize * AUDIO_FRAME_BYTES
+        );
+        assert!(
+            completed.pcm[..AUDIO_FRAME_BYTES]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        assert!(
+            completed.pcm[(MIN_CAPTURE_FRAMES as usize - 1) * AUDIO_FRAME_BYTES..]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+
+        let large_gap = session(1, 1, 2);
         assert!(matches!(
-            assembler.ingest(&packet(gap, 1, 0), first, now),
+            assembler.ingest(
+                &packet(large_gap, MAX_CAPTURE_GAP_FRAMES + 1, 0),
+                first,
+                now
+            ),
             Err(LanVoiceError::InvalidSequence)
         ));
-        let changed_source = session(1, 1, 2);
+        let changed_source = session(1, 1, 3);
         assembler
             .ingest(&packet(changed_source, 0, 0), first, now)
             .unwrap();
@@ -1635,10 +1708,10 @@ mod tests {
             Err(LanVoiceError::InvalidSequence)
         ));
         assert!(parse_audio_frame(b"short", Some(&TEST_AUTH_KEY)).is_err());
-        let mut wrong_rate = packet(session(1, 1, 3), 0, 0);
+        let mut wrong_rate = packet(session(1, 1, 4), 0, 0);
         wrong_rate[20..24].copy_from_slice(&48_000_u32.to_le_bytes());
         assert!(parse_audio_frame(&wrong_rate, Some(&TEST_AUTH_KEY)).is_err());
-        let mut forged = packet(session(1, 1, 4), 0, 0);
+        let mut forged = packet(session(1, 1, 5), 0, 0);
         *forged.last_mut().unwrap() ^= 1;
         assert!(matches!(
             parse_audio_frame(&forged, Some(&TEST_AUTH_KEY)),

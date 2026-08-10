@@ -8,9 +8,15 @@ Codex Keyboard 是一个四槽实体 Codex 终端。EasyInput V2 和 Mac 必须�
 |---|---|
 | S1-S4 | 对槽位 1-4 按住说话，松开后 ASR 并进入对应 Codex task FIFO |
 | S5-S8 | 播放槽位 1-4 最新未读完成总结 |
+| 旋钮逆时针 / 顺时针 | 键盘板载扬声器音量减小 / 增大 |
+| 短按旋钮 | 播放预置的当前音量播报；长按 3 秒仍进入配置模式 |
 
 绑定不写入固件。桌面 App 从本机 Codex catalog 选择 task，Host 原子保存 `slot -> task UUID`；
 固件永远只发送 `slot=1..4`。
+
+旋钮不进入 Codex 槽位协议，也不依赖桌面 App。固件将物理旋转映射为十档板载 PCM 播放增益，
+逆时针降低、顺时针提高，并把当前档位持久保存到设备。短按时直接播放预先生成并嵌入固件的中文
+音量提示，长按 3 秒仍进入配置模式。
 
 ## 部署单元
 
@@ -44,7 +50,7 @@ Codex 模型调用仍需要 Mac 具备互联网连接。
 
 1. S1-S4 按下后固件先抢占播放，再启动 16 kHz mono PCM16 采集。
 2. EICC 控制会话建立后，EIAU v3 帧携带 slot、capture generation、route generation、sequence 和 HMAC。
-3. Host 严格验证来源、鉴权、顺序、长度和结束包；空音频、缺帧、旧 generation 均拒绝。
+3. Host 验证来源、鉴权、长度和结束包；少量 UDP 缺帧补静音继续识别，大范围缺帧和旧 generation 拒绝。
 4. Host 默认调用北京区 `qwen3-asr-flash`，成功文本以 durable request 写入 task FIFO。
 5. 同 task 永不并发，prompt 经 stdin 传给 `codex exec resume --json <task-id> -`。
 
@@ -56,10 +62,9 @@ Codex 模型调用仍需要 Mac 具备互联网连接。
 `longanfengyue`；完整 WAV 通过 HTTPS 下载并校验。只有 WAV/EIAD 编码、加密和 fsync 全部成功后，
 才原子发布新 generation。
 
-Spark 输出必须包含有依据的具体完成事项、可观察结果、待办和决策；只有中文且通过内容质量门禁的
-`spoken_text` 才能进入 TTS。首次质量失败允许用相同 completion 集合有界重试一次，第二次仍失败则不
-调用 TTS，也不消费 completion。旧摘要未听时，它是下一代摘要的必需输入，仍相关的事实、待办和决策
-必须保留，避免新完成覆盖旧信箱内容。
+总结质量交给 Luna 的提示词和模型能力，不再用事实字数、证据摘录、中文评分或新旧文本增量去阻断
+可用结果。Host 只保留运行底线：输出结构可解析、completion 归属正确、字段非空且有界、完成脱敏，
+并且 TTS/WAV/cache 发布有效。旧摘要未听时仍完整交给 Luna 作为累计上下文，由模型自然重新提炼。
 
 单条语音上限为 150 秒。48 kHz mono PCM16 WAV 最多约 14.4 MB，编码后的设备 EIAD 最多约
 3.69 MB，仍低于当前 16 MB Host 单对象缓存和 4 MB 固件完整预下载边界；播放完成等待另留 30 秒，
@@ -93,7 +98,9 @@ DashScope key 只在同一 App Support 根下的 mode-0600 `.env`；cache/device
    之后饱和。
 5. 最右第 5 颗灯只表示已绑定 Codex 任务的运行总数：0 个绿色、1 个黄色、2 个橙色、3 个紫色、
    4 个红色；全部完成后回到绿色。
-6. 按键、录音、播放、配置和错误等直接反馈可以临时覆盖五灯，反馈结束后恢复最新信箱与任务活动状态。
+6. Host 最多允许四个不同任务同时运行，因此四个槽都能触发第五灯的完整忙碌等级；同一个
+   Codex task 仍严格 FIFO，不会在同一段对话里并发写入。
+7. 按键、录音、播放、配置和错误等直接反馈可以临时覆盖五灯，反馈结束后恢复最新信箱与任务活动状态。
 
 当前完整 PSRAM 预下载只是真机候选。发布版仍需升级为有界 jitter/ring 边下边播。
 

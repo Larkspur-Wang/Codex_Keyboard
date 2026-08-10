@@ -16,7 +16,7 @@ use crate::store::{
 pub enum PromptQueueError {
     #[error("slot has no current binding")]
     UnboundSlot,
-    #[error("binding lookup failed")]
+    #[error("binding lookup failed: {0}")]
     Binding(#[from] BindingError),
     #[error("Host state failed")]
     Store(#[from] StoreError),
@@ -212,18 +212,22 @@ mod tests {
     }
 
     #[test]
-    fn different_tasks_run_concurrently_while_same_task_remains_fifo() {
+    fn four_different_tasks_run_concurrently() {
         let temp = tempdir().unwrap();
         let first = temp.path().join("first.started");
         let second = temp.path().join("second.started");
+        let third = temp.path().join("third.started");
+        let fourth = temp.path().join("fourth.started");
         let order = temp.path().join("order");
         let executable = write_script(
             temp.path(),
             &format!(
-                "p=$(cat); touch '{}/'$p.started; i=0; while [ ! -e '{}' ] || [ ! -e '{}' ]; do i=$((i+1)); [ $i -lt 200 ] || exit 7; sleep 0.01; done; printf '%s\\n' \"$p\" >> '{}'; printf '{{}}\\n'",
+                "p=$(cat); touch '{}/'$p.started; i=0; while [ ! -e '{}' ] || [ ! -e '{}' ] || [ ! -e '{}' ] || [ ! -e '{}' ]; do i=$((i+1)); [ $i -lt 200 ] || exit 7; sleep 0.01; done; printf '%s\\n' \"$p\" >> '{}'; printf '{{}}\\n'",
                 temp.path().display(),
                 first.display(),
                 second.display(),
+                third.display(),
+                fourth.display(),
                 order.display()
             ),
         );
@@ -231,13 +235,21 @@ mod tests {
         let mut store = StateStore::open(&temp.path().join("state.sqlite3")).unwrap();
         enqueue(&mut store, "r1", "task-a", "first", temp.path());
         enqueue(&mut store, "r2", "task-b", "second", temp.path());
+        enqueue(&mut store, "r3", "task-c", "third", temp.path());
+        enqueue(&mut store, "r4", "task-d", "fourth", temp.path());
 
         scheduler.tick(&mut store).unwrap();
-        assert_eq!(scheduler.in_flight(), 2);
-        drive_until_idle(&mut scheduler, &mut store, &["task-a", "task-b"]);
+        assert_eq!(scheduler.in_flight(), 4);
+        drive_until_idle(
+            &mut scheduler,
+            &mut store,
+            &["task-a", "task-b", "task-c", "task-d"],
+        );
         let lines = fs::read_to_string(order).unwrap();
         assert!(lines.contains("first\n"));
         assert!(lines.contains("second\n"));
+        assert!(lines.contains("third\n"));
+        assert!(lines.contains("fourth\n"));
     }
 
     #[test]

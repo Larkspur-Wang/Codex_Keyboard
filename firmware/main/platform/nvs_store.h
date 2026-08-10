@@ -26,6 +26,10 @@ class NvsConfigStore {
                           esp_err_t* out_err = nullptr) const;
   bool save_host_platform(ai_keyboard::HostPlatform platform,
                           esp_err_t* out_err = nullptr) const;
+  bool load_speaker_volume(std::uint8_t* level,
+                           esp_err_t* out_err = nullptr) const;
+  bool save_speaker_volume(std::uint8_t level,
+                           esp_err_t* out_err = nullptr) const;
   bool save_config_and_host_platform(const std::string& json,
                                      ai_keyboard::HostPlatform platform,
                                      esp_err_t* out_err = nullptr) const;

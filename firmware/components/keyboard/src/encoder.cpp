@@ -1,5 +1,7 @@
 #include "keyboard/encoder.h"
 
+#include <algorithm>
+
 namespace ai_keyboard {
 namespace {
 
@@ -22,6 +24,36 @@ int transition_delta(std::uint8_t previous, std::uint8_t current) {
 }
 
 }  // namespace
+
+std::uint8_t adjust_speaker_volume_for_wired_encoder_step(
+    std::uint8_t current_level,
+    int encoder_step) {
+  const auto bounded = static_cast<int>(
+      std::clamp<std::uint8_t>(
+          current_level, kSpeakerVolumeMinimum, kSpeakerVolumeMaximum));
+  // The V2 GPIO wiring reports a physical clockwise detent as a negative
+  // decoder step. One physical detent changes one of the ten local levels.
+  const auto adjusted = bounded - encoder_step;
+  return static_cast<std::uint8_t>(std::clamp(
+      adjusted,
+      static_cast<int>(kSpeakerVolumeMinimum),
+      static_cast<int>(kSpeakerVolumeMaximum)));
+}
+
+std::uint16_t speaker_volume_gain_per_mille(std::uint8_t level) {
+  constexpr std::array<std::uint16_t, kSpeakerVolumeMaximum + 1> kGain{{
+      0, 80, 120, 180, 260, 360, 480, 620, 760, 880, 1000,
+  }};
+  return kGain[std::clamp<std::uint8_t>(
+      level, kSpeakerVolumeMinimum, kSpeakerVolumeMaximum)];
+}
+
+std::int16_t scale_speaker_sample(std::int16_t sample,
+                                  std::uint8_t level) {
+  const auto scaled = static_cast<std::int32_t>(sample) *
+      static_cast<std::int32_t>(speaker_volume_gain_per_mille(level)) / 1000;
+  return static_cast<std::int16_t>(scaled);
+}
 
 bool EncoderStepQueue::push(int step) {
   if (step == 0) {

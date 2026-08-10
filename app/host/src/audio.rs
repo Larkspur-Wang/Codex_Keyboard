@@ -132,14 +132,26 @@ pub fn decode_wav(wav: &[u8]) -> Result<Zeroizing<Vec<u8>>, AudioError> {
     {
         return Err(AudioError::InvalidWav);
     }
-    let data_bytes = usize::try_from(read_u32(wav, 40)?).map_err(|_| AudioError::InvalidWav)?;
-    let expected = WAV_HEADER_BYTES
-        .checked_add(data_bytes)
-        .ok_or(AudioError::InvalidWav)?;
-    if expected != wav.len()
-        || read_u32(wav, 4)? != u32::try_from(wav.len() - 8).map_err(|_| AudioError::InvalidWav)?
-    {
-        return Err(AudioError::InvalidWav);
+    let declared_riff_bytes = read_u32(wav, 4)?;
+    let declared_data_bytes = read_u32(wav, 40)?;
+    // Qwen Audio 3.0 may return a seekless WAV whose RIFF/data fields carry
+    // fixed signed-32 streaming sentinels. The authenticated HTTP body length
+    // remains authoritative, so accept only this exact observed producer
+    // shape and validate the received PCM bytes normally.
+    let streaming_sentinel =
+        declared_riff_bytes == 0x7fff_ffbf && declared_data_bytes == 0x7fff_ff9b;
+    if !streaming_sentinel {
+        let data_bytes =
+            usize::try_from(declared_data_bytes).map_err(|_| AudioError::InvalidWav)?;
+        let expected = WAV_HEADER_BYTES
+            .checked_add(data_bytes)
+            .ok_or(AudioError::InvalidWav)?;
+        if expected != wav.len()
+            || declared_riff_bytes
+                != u32::try_from(wav.len() - 8).map_err(|_| AudioError::InvalidWav)?
+        {
+            return Err(AudioError::InvalidWav);
+        }
     }
     validate_pcm(&wav[WAV_HEADER_BYTES..]).map_err(|_| AudioError::InvalidWav)?;
     Ok(Zeroizing::new(wav[WAV_HEADER_BYTES..].to_vec()))
@@ -569,6 +581,23 @@ mod tests {
         assert_eq!(decode_wav(artifacts.wav()).unwrap().as_slice(), source);
         assert_eq!(artifacts.samples(), 2_401);
         assert_eq!(artifacts.duration_ms(), 50);
+    }
+
+    #[test]
+    fn qwen_streaming_length_sentinel_uses_the_received_wav_size() {
+        let source = pcm(2_401);
+        let mut wav = encode_tts_audio(&source).unwrap().wav().to_vec();
+        wav[4..8].copy_from_slice(&0x7fff_ffbf_u32.to_le_bytes());
+        wav[40..44].copy_from_slice(&0x7fff_ff9b_u32.to_le_bytes());
+        assert_eq!(decode_wav(&wav).unwrap().as_slice(), source);
+    }
+
+    #[test]
+    fn incomplete_qwen_streaming_sentinel_pair_is_rejected() {
+        let source = pcm(2_401);
+        let mut wav = encode_tts_audio(&source).unwrap().wav().to_vec();
+        wav[4..8].copy_from_slice(&0x7fff_ffbf_u32.to_le_bytes());
+        assert_eq!(decode_wav(&wav), Err(AudioError::InvalidWav));
     }
 
     #[test]

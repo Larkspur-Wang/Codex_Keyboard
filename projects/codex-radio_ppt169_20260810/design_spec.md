@@ -140,9 +140,9 @@ No numerical data chart is required, so no chart template is locked.
 | P07 | breathing | AI 能并行，人却只有一双手 | Land the scheduling bottleneck |
 | P08 | anchor | 手边正好有一块八键开发板 | Explain the idea moment |
 | P09 | anchor | 四个任务，就是四个频道 | Make the walkie-talkie metaphor memorable |
-| P10 | dense | 最初的交互草图 | Map top keys, bottom keys, four lights |
+| P10 | dense | 最初的交互草图 | Map top keys, bottom keys, five lights, and volume knob |
 | P11 | breathing | EasyInput 的本质是一块开发板 | Reframe the keyboard |
-| P12 | dense | 用人话认识这块硬件 | Press, turn, hear, speak, light |
+| P12 | dense | 用人话认识这块硬件 | Press, board-speaker volume, announce level, hear, speak, light |
 | P13 | breathing | 这次真正用上了四个原本闲着的能力 | PSRAM, Wi-Fi audio, amplifier, speaker |
 | P14 | breathing | 第一版先把本地 Wi-Fi 跑通 | Set an honest boundary for “remote” |
 | P15 | dense | Mac App 负责绑定四个任务 | Show the four-slot dashboard |

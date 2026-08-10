@@ -262,7 +262,7 @@ kbd {
 
 .provider-facts {
   display: grid;
-  grid-template-columns: 0.8fr 1.55fr 0.4fr;
+  grid-template-columns: 0.9fr 1.3fr 0.65fr;
   gap: 16px;
   margin: 10px 0 0 16px;
 }

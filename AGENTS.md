@@ -8,6 +8,8 @@
 - 本仓只做同一局域网内的 `Keyboard <-> Mac Host` 产品。
 - 不实现手机 PWA、Cloudflare、Relay、远程 WSS、热点代理或公网访问。
 - 上排 `S1-S4` 是槽位 1-4 的 PTT；下排 `S5-S8` 是槽位 1-4 的未读总结播放。
+- 旋钮旋转固定为板载扬声器音量：物理逆时针减小、顺时针增大，不向 Mac 发送系统音量键；
+  短按旋钮立即播放固件内预置的当前音量播报，长按 3 秒仍进入配置模式。
 - 固件不保存 Codex task UUID；`slot -> task` 的唯一真相源是 Mac Host SQLite。
 - Tauri App 是本地 Host 的管理界面，不拥有第二份状态。
 - 总结固定由 Host 隔离调用 `gpt-5.6-luna`，reasoning effort 为 `high`；TTS 固定调用北京区

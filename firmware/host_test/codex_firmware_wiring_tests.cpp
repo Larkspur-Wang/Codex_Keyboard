@@ -155,6 +155,27 @@ void mailbox_status_is_authenticated_and_restored_as_led_background() {
   assert(mailbox_background < agent_background);
 }
 
+void encoder_controls_board_speaker_and_press_uses_embedded_prompt() {
+  const auto app = read_file(
+      std::string(EASY_INPUT_REPO_ROOT) + "/main/app_main.cpp");
+  const auto speaker = read_file(
+      std::string(EASY_INPUT_REPO_ROOT) + "/main/platform/speaker_output.cpp");
+
+  assert(app.find("adjust_speaker_volume_for_wired_encoder_step") !=
+         std::string::npos);
+  assert(app.find("clockwise_up") != std::string::npos);
+  assert(app.find("counter_clockwise_down") != std::string::npos);
+  assert(app.find("speaker.set_volume_level(adjusted)") != std::string::npos);
+  assert(app.find("save_speaker_volume") != std::string::npos);
+  assert(app.find("speaker_assets::volume_prompt") != std::string::npos);
+  assert(app.find("speaker.begin(app->platform_task, &app->audio_io_arbiter)") !=
+         std::string::npos);
+  assert(app.find("request_embedded_asset") != std::string::npos);
+  assert(app.find("queue_consumer_tap_for_epoch") == std::string::npos);
+  assert(app.find("send_consumer_tap_for_owner") == std::string::npos);
+  assert(speaker.find("scale_speaker_sample") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -163,5 +184,6 @@ int main() {
   ptt_release_drains_tail_then_emits_an_authenticated_terminal();
   lower_row_playback_uses_authenticated_lan_psram_and_speaker_path();
   mailbox_status_is_authenticated_and_restored_as_led_background();
+  encoder_controls_board_speaker_and_press_uses_embedded_prompt();
   return 0;
 }

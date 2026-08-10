@@ -27,6 +27,7 @@
 #include "keyboard/config_status.h"
 #include "keyboard/config_state.h"
 #include "keyboard/codex_slot_state.h"
+#include "keyboard/encoder.h"
 #include "keyboard/held_keyboard_state.h"
 #include "keyboard/hid_report_queue.h"
 #include "keyboard/keyboard_snapshot_delivery.h"
@@ -52,6 +53,7 @@
 #include "platform/codex_lan_playback.h"
 #include "platform/speaker_assets_supervisor.h"
 #include "speaker_assets/factory_boot_sound.h"
+#include "speaker_assets/volume_prompt.h"
 #endif
 #if defined(EASY_INPUT_SPEAKER_ASSETS_DIAGNOSTIC)
 #include "speaker_assets/diagnostic_link_anchor.h"
@@ -73,7 +75,7 @@ constexpr const char* kFirmwareVersion =
     "0.4.40-idf-v2-spk-boot-probe";
 #elif defined(EASY_INPUT_SPEAKER_ASSETS_PRODUCT)
 constexpr const char* kFirmwareVersion =
-    "0.6.0-easy-codex-task-activity";
+    "0.6.2-easy-codex-board-volume";
 #else
 constexpr const char* kFirmwareVersion = "0.4.40-idf-v2-audio-pool";
 #endif
@@ -105,13 +107,8 @@ constexpr std::uint32_t kActiveHeartbeatLogIntervalMs = 60000;
 constexpr std::uint32_t kIdleHeartbeatLogIntervalMs = 600000;
 constexpr std::uint32_t kEncoderConfigModeHoldMs = 3000;
 constexpr std::uint32_t kPlatformSelectionModeTimeoutMs = 10000;
-constexpr int kEncoderScrollMaxReportMagnitude = 96;
-constexpr int kEncoderWheelMaxChunkMagnitude = 24;
-constexpr std::uint32_t kEncoderWheelFlushIntervalMs = 12;
-constexpr int kEncoderCursorMaxTapsPerEvent = 4;
-constexpr std::uint32_t kEncoderCursorTapHoldMs = 10;
-constexpr std::uint32_t kEncoderCursorTapGapMs = 4;
 constexpr std::uint32_t kEncoderLedFeedbackMinIntervalMs = 45;
+constexpr std::uint32_t kSpeakerVolumePersistDelayMs = 1000;
 constexpr std::uint16_t kBleActiveConnIntervalMin = 12;
 constexpr std::uint16_t kBleActiveConnIntervalMax = 36;
 constexpr std::uint16_t kBleActiveConnLatency = 0;
@@ -127,10 +124,6 @@ constexpr std::uint32_t kSpeakerAssetsInputQuietMs = 30;
 #if defined(EASY_INPUT_SPEAKER_ASSETS_PRODUCT)
 constexpr std::uint32_t kSpeakerAssetsRetryMs = 1000;
 #endif
-constexpr std::uint8_t kHidKeyArrowRight = 0x4F;
-constexpr std::uint8_t kHidKeyArrowLeft = 0x50;
-constexpr std::uint8_t kHidKeyArrowDown = 0x51;
-constexpr std::uint8_t kHidKeyArrowUp = 0x52;
 constexpr std::uint32_t kRetainedPowerCycleMagic = 0x50435943;
 constexpr std::uint16_t kRetainedPowerCycleVersion = 1;
 
@@ -151,11 +144,6 @@ RTC_DATA_ATTR RetainedPowerCycle g_retained_power_cycle;
 int encoder_step_count(int encoder_step) {
   const int magnitude = encoder_step < 0 ? -encoder_step : encoder_step;
   return magnitude == 0 ? 1 : magnitude;
-}
-
-std::int8_t hid_axis_value(int value) {
-  return static_cast<std::int8_t>(
-      std::clamp(value, -kEncoderScrollMaxReportMagnitude, kEncoderScrollMaxReportMagnitude));
 }
 
 using PowerMode = ai_keyboard::PowerPolicyMode;
@@ -254,11 +242,12 @@ struct AppContext {
   std::uint32_t encoder_press_down_ms = 0;
   ai_keyboard::PlatformSelectionController platform_selection;
   std::uint32_t last_encoder_led_feedback_ms = 0;
-  ai_keyboard::MouseWheelQueue pending_wheel_reports;
-  std::uint32_t last_wheel_flush_ms = 0;
-  std::uint32_t wheel_send_failures = 0;
-  std::uint32_t wheel_transport_drops = 0;
-  std::uint32_t wheel_coalesced_reports = 0;
+#if defined(EASY_INPUT_SPEAKER_DIAGNOSTIC) || \
+    defined(EASY_INPUT_SPEAKER_ASSETS_PRODUCT)
+  std::uint8_t speaker_volume_level = ai_keyboard::kSpeakerVolumeDefault;
+  bool speaker_volume_dirty = false;
+  std::uint32_t speaker_volume_changed_ms = 0;
+#endif
   std::uint32_t hid_event_sequence = 0;
   ai_keyboard::HeldKeyboardState held_keyboard;
   ai_keyboard::KeyboardSnapshotDelivery keyboard_delivery;
@@ -469,28 +458,6 @@ int input_gpio(ai_keyboard::InputId input) {
       return -1;
   }
   return -1;
-}
-
-const char* encoder_scroll_axis_name(ai_keyboard::EncoderScrollAxis axis) {
-  switch (axis) {
-    case ai_keyboard::EncoderScrollAxis::Vertical:
-      return "vertical";
-    case ai_keyboard::EncoderScrollAxis::Horizontal:
-      return "horizontal";
-    case ai_keyboard::EncoderScrollAxis::Toggle:
-      return "toggle";
-  }
-  return "unknown";
-}
-
-const char* encoder_rotation_mode_name(ai_keyboard::EncoderRotationMode mode) {
-  switch (mode) {
-    case ai_keyboard::EncoderRotationMode::Scroll:
-      return "scroll";
-    case ai_keyboard::EncoderRotationMode::Cursor:
-      return "cursor";
-  }
-  return "unknown";
 }
 
 const char* parse_status_name(ai_keyboard::ConfigParseStatus status) {
@@ -1257,8 +1224,6 @@ void handle_ptt_keyboard_audio(AppContext* app,
   }
 }
 
-void toggle_encoder_scroll_axis(AppContext* app);
-
 const char* keyboard_transport_name(ai_keyboard::KeyboardTransportOwner owner) {
   switch (owner) {
     case ai_keyboard::KeyboardTransportOwner::None:
@@ -1283,20 +1248,11 @@ void reconcile_keyboard_transport_lifetimes(AppContext* app) {
   app->transport_usb_mounted = usb_epoch != 0;
   app->usb_transport_epoch = usb_epoch;
 
-  const bool previous_ble_connected = app->transport_ble_connected;
-  const auto previous_ble_epoch = app->ble_transport_epoch;
   const auto ble_epoch = app->ble.connection_epoch();
   app->transport_ble_connected =
       app->ble.connected() && ble_epoch != 0;
   app->ble_transport_epoch =
       app->transport_ble_connected ? ble_epoch : 0;
-  if (previous_ble_connected != app->transport_ble_connected ||
-      previous_ble_epoch != app->ble_transport_epoch) {
-    // Relative movement belongs to one concrete host lifetime. It has no
-    // release state to reconcile, so stale displacement is discarded exactly
-    // at the lifetime boundary and never replayed after reconnect.
-    app->pending_wheel_reports.clear();
-  }
 
   const bool keyboard_invalidated =
       app->keyboard_transport.observe_transport_state(
@@ -1646,41 +1602,33 @@ void dispatch_firmware_event(AppContext* app,
 }
 
 void dispatch_encoder_press_click(AppContext* app) {
-  const auto& action = app->config_state.keymap().action_for(ai_keyboard::InputId::EncoderPress);
-  if (action.kind == ai_keyboard::ActionKind::ScrollAxisToggle) {
-    toggle_encoder_scroll_axis(app);
+#if defined(EASY_INPUT_SPEAKER_ASSETS_PRODUCT)
+  if (!app->speaker.ready()) {
+    if (app->speaker_startup_phase != SpeakerStartupPhase::Ready ||
+        app->speaker.begin(app->platform_task, &app->audio_io_arbiter) != ESP_OK) {
+      ESP_LOGW(kTag, "ENC_PRESS volume announcement speaker unavailable");
+      return;
+    }
+  }
+  const auto prompt = easy_input::speaker_assets::volume_prompt(
+      app->speaker_volume_level);
+  if (prompt.encoded == nullptr || prompt.encoded_bytes == 0U ||
+      !app->speaker.request_embedded_asset(
+          prompt.encoded, prompt.encoded_bytes)) {
+    ESP_LOGW(kTag,
+             "ENC_PRESS volume announcement unavailable level=%u busy=%u",
+             static_cast<unsigned>(app->speaker_volume_level),
+             app->speaker.busy() ? 1U : 0U);
     return;
   }
-
-  const auto press_event =
-      ai_keyboard::event_for_action(action,
-                                    ai_keyboard::InputPhase::Pressed,
-                                    app->config_state.ptt_hotkey(),
-                                    app->config_state.edit_ptt_hotkey(),
-                                    app->config_state.target_platform());
-  dispatch_firmware_event(app, ai_keyboard::InputId::EncoderPress, press_event);
-
-  const auto release_event =
-      ai_keyboard::event_for_action(action,
-                                    ai_keyboard::InputPhase::Released,
-                                    app->config_state.ptt_hotkey(),
-                                    app->config_state.edit_ptt_hotkey(),
-                                    app->config_state.target_platform());
-  if (release_event.kind != ai_keyboard::FirmwareEventKind::None) {
-    vTaskDelay(delay_ticks(15));
-    dispatch_firmware_event(app, ai_keyboard::InputId::EncoderPress, release_event);
-  }
-}
-
-ai_keyboard::EncoderScrollAxis active_encoder_axis(AppContext* app,
-                                                   const ai_keyboard::EncoderScrollConfig& config) {
-  const auto& press_action =
-      app->config_state.keymap().action_for(ai_keyboard::InputId::EncoderPress);
-  const bool press_toggles_axis = press_action.kind == ai_keyboard::ActionKind::ScrollAxisToggle;
-  if (config.axis == ai_keyboard::EncoderScrollAxis::Toggle || press_toggles_axis) {
-    return app->encoder_scroll_axis;
-  }
-  return config.axis;
+  mark_activity(app, millis(), "speaker_volume_announcement");
+  ESP_LOGI(kTag,
+           "ENC_PRESS volume announcement level=%u percent=%u",
+           static_cast<unsigned>(app->speaker_volume_level),
+           static_cast<unsigned>(app->speaker_volume_level) * 10U);
+#else
+  ESP_LOGI(kTag, "ENC_PRESS volume announcement unavailable in this build");
+#endif
 }
 
 void release_keyboard_reports(AppContext* app) {
@@ -1748,108 +1696,14 @@ void handle_platform_selection_result(
   }
 }
 
-void tap_keyboard_keycode(AppContext* app,
-                          ai_keyboard::InputId source,
-                          std::uint8_t keycode,
-                          int repeat_count = 1) {
-  const int taps = std::clamp(repeat_count, 1, kEncoderCursorMaxTapsPerEvent);
-  ai_keyboard::HidKeyboardReport report;
-  report.valid = keycode != 0;
-  report.keycode = keycode;
-  report.keycodes[0] = keycode;
-  for (int index = 0; index < taps; ++index) {
-    const auto pressed = app->held_keyboard.press(source, report);
-    if (pressed.accepted() && pressed.report_changed) {
-      app->keyboard_delivery.set_desired(pressed.snapshot);
-      flush_pending_keyboard_snapshot(app);
-    }
-    vTaskDelay(delay_ticks(kEncoderCursorTapHoldMs));
-    const auto released = app->held_keyboard.release(source);
-    if (released.accepted() && released.report_changed) {
-      app->keyboard_delivery.set_desired(released.snapshot);
-      flush_pending_keyboard_snapshot(app);
-    }
-    if (index + 1 < taps) {
-      vTaskDelay(delay_ticks(kEncoderCursorTapGapMs));
-    }
-  }
-}
-
-bool send_ble_mouse_wheel_report(AppContext* app,
-                                 std::int8_t vertical,
-                                 std::int8_t horizontal,
-                                 ai_keyboard::BleOwnerToken expected_owner) {
-  return app->ble.send_mouse_wheel_for_owner(
-      vertical, horizontal, expected_owner);
-}
-
-bool ble_mouse_wheel_transport_available(const AppContext* app) {
-  return app->ble.connected();
-}
-
-void queue_mouse_wheel_report(AppContext* app,
-                              std::int8_t vertical,
-                              std::int8_t horizontal,
-                              std::uint32_t now_ms) {
-  if (vertical == 0 && horizontal == 0) {
-    return;
-  }
-
-  // Transport ownership is selected when the physical movement arrives, not
-  // when a HID endpoint later becomes ready. A mounted USB interface keeps
-  // ownership through endpoint backpressure; the USB transport's bounded
-  // queue consumes displacement only after TinyUSB accepts the report.
-  bool coalesced = false;
-  const auto usb_epoch = app->usb.connection_epoch();
-  if (usb_epoch != 0) {
-    if (!app->usb.queue_mouse_wheel_for_epoch(
-            vertical, horizontal, usb_epoch, &coalesced)) {
-      ++app->wheel_transport_drops;
-      ESP_LOGD(kTag,
-               "wheel USB queue full; dropped vertical=%d horizontal=%d drops=%lu",
-               static_cast<int>(vertical),
-               static_cast<int>(horizontal),
-               static_cast<unsigned long>(app->wheel_transport_drops));
-      return;
-    }
-    if (coalesced) {
-      ++app->wheel_coalesced_reports;
-    }
-    return;
-  }
-
-  // With USB absent this queue is owned by one exact BLE connection lifetime.
-  // Movement observed without an HID owner is discarded instead of replayed
-  // into a future host.
-  const auto ble_owner = app->ble.connection_identity();
-  if (!ble_owner.valid()) {
-    ++app->wheel_transport_drops;
-    return;
-  }
-  if (!app->pending_wheel_reports.push(
-          vertical,
-          horizontal,
-          now_ms,
-          nullptr,
-          &coalesced,
-          nullptr,
-          ble_owner)) {
-    ++app->wheel_transport_drops;
-    ESP_LOGD(kTag,
-             "wheel BLE queue full; dropped vertical=%d horizontal=%d drops=%lu",
-             static_cast<int>(vertical),
-             static_cast<int>(horizontal),
-             static_cast<unsigned long>(app->wheel_transport_drops));
-    return;
-  }
-  if (coalesced) {
-    ++app->wheel_coalesced_reports;
-  }
-}
-
-bool has_pending_wheel_report(const AppContext* app) {
-  return !app->pending_wheel_reports.empty() ||
-         app->usb.mouse_wheel_report_pending();
+bool has_pending_encoder_work(const AppContext* app) {
+#if defined(EASY_INPUT_SPEAKER_DIAGNOSTIC) || \
+    defined(EASY_INPUT_SPEAKER_ASSETS_PRODUCT)
+  return app->speaker_volume_dirty;
+#else
+  static_cast<void>(app);
+  return false;
+#endif
 }
 
 ai_keyboard::PowerPolicyInputs power_policy_inputs(AppContext* app,
@@ -1857,7 +1711,7 @@ ai_keyboard::PowerPolicyInputs power_policy_inputs(AppContext* app,
   auto inputs = base_power_policy_inputs(app, now_ms);
   inputs.config_window_active = app->ble.config_window_active();
   inputs.encoder_press_pending = app->encoder_press_pending;
-  inputs.wheel_report_pending = has_pending_wheel_report(app);
+  inputs.wheel_report_pending = has_pending_encoder_work(app);
   inputs.audio_streaming = app->audio.streaming();
 #if defined(EASY_INPUT_SPEAKER_DIAGNOSTIC) || \
     defined(EASY_INPUT_SPEAKER_ASSETS_PRODUCT)
@@ -2113,70 +1967,10 @@ void maybe_enter_deep_sleep(AppContext* app, std::uint32_t now_ms) {
   }
 }
 
-std::int8_t wheel_chunk(int pending) {
-  return static_cast<std::int8_t>(
-      std::clamp(pending, -kEncoderWheelMaxChunkMagnitude, kEncoderWheelMaxChunkMagnitude));
-}
-
-void flush_pending_wheel_report(AppContext* app, std::uint32_t now_ms, bool force = false) {
-  if (!has_pending_wheel_report(app)) {
-    return;
-  }
-  if (!force && app->last_wheel_flush_ms != 0 &&
-      now_ms - app->last_wheel_flush_ms < kEncoderWheelFlushIntervalMs) {
-    return;
-  }
-
-  ai_keyboard::QueuedMouseWheel report;
-  if (!app->pending_wheel_reports.front(&report)) {
-    return;
-  }
-
-  const auto current_owner = app->ble.connection_identity();
-  if (!report.ble_owner.valid() || current_owner != report.ble_owner) {
-    app->pending_wheel_reports.pop_if_sequence(report.sequence);
-    ++app->wheel_transport_drops;
-    ESP_LOGD(kTag,
-             "BLE wheel owner changed; discarded seq=%lu vertical=%d "
-             "horizontal=%d drops=%lu",
-             static_cast<unsigned long>(report.sequence),
-             report.vertical,
-             report.horizontal,
-             static_cast<unsigned long>(app->wheel_transport_drops));
-    return;
-  }
-
-  if (!ble_mouse_wheel_transport_available(app)) {
-    return;
-  }
-
-  const std::int8_t vertical = wheel_chunk(report.vertical);
-  const std::int8_t horizontal = wheel_chunk(report.horizontal);
-  app->last_wheel_flush_ms = now_ms;
-
-  if (vertical == 0 && horizontal == 0) {
-    return;
-  }
-
-  if (!send_ble_mouse_wheel_report(
-          app, vertical, horizontal, report.ble_owner)) {
-    ++app->wheel_send_failures;
-    ESP_LOGD(kTag,
-             "BLE wheel HID busy; seq=%lu vertical=%d horizontal=%d failures=%lu",
-             static_cast<unsigned long>(report.sequence),
-             report.vertical,
-             report.horizontal,
-             static_cast<unsigned long>(app->wheel_send_failures));
-    return;
-  }
-  app->pending_wheel_reports.consume_if_sequence(report.sequence, vertical, horizontal);
-}
-
-void show_encoder_scroll_feedback(AppContext* app,
-                                  std::int8_t vertical,
-                                  std::int8_t horizontal,
+void show_encoder_volume_feedback(AppContext* app,
+                                  std::int8_t direction,
                                   std::uint32_t now_ms) {
-  if ((vertical == 0 && horizontal == 0) || app == nullptr) {
+  if (direction == 0 || app == nullptr) {
     return;
   }
   if (app->last_encoder_led_feedback_ms != 0 &&
@@ -2184,92 +1978,68 @@ void show_encoder_scroll_feedback(AppContext* app,
     return;
   }
   app->last_encoder_led_feedback_ms = now_ms;
-  app->leds.show_scroll_event(vertical, horizontal, now_ms);
-}
-
-void dispatch_encoder_scroll(AppContext* app,
-                             const easy_input::InputEvent& event,
-                             ai_keyboard::EncoderScrollAxis axis) {
-  const auto& config = app->config_state.encoder_scroll();
-  const auto direction =
-      (event.encoder_step > 0 ? config.speed : -config.speed) * encoder_step_count(event.encoder_step);
-  std::int8_t vertical = 0;
-  std::int8_t horizontal = 0;
-  if (axis == ai_keyboard::EncoderScrollAxis::Vertical) {
-    const auto value = config.reverse_vertical ? direction : -direction;
-    vertical = hid_axis_value(value);
-  } else {
-    const auto value = config.reverse_horizontal ? -direction : direction;
-    horizontal = hid_axis_value(value);
-  }
-
-  ESP_LOGD(kTag,
-           "ENC_SCROLL axis=%s speed=%d vertical=%d horizontal=%d",
-           encoder_scroll_axis_name(axis),
-           config.speed,
-           static_cast<int>(vertical),
-           static_cast<int>(horizontal));
-  const std::uint32_t now_ms = millis();
-  show_encoder_scroll_feedback(app, vertical, horizontal, now_ms);
-  queue_mouse_wheel_report(app, vertical, horizontal, now_ms);
-  flush_pending_wheel_report(app, now_ms, app->last_wheel_flush_ms == 0);
-}
-
-void dispatch_encoder_cursor(AppContext* app,
-                             const easy_input::InputEvent& event,
-                             ai_keyboard::EncoderScrollAxis axis) {
-  // The encoder's logical step is inverted from the physical cursor direction:
-  // clockwise should move right/down, counter-clockwise should move left/up.
-  const bool clockwise = event.encoder_step < 0;
-  std::uint8_t keycode = 0;
-  std::int8_t vertical_feedback = 0;
-  std::int8_t horizontal_feedback = 0;
-
-  if (axis == ai_keyboard::EncoderScrollAxis::Vertical) {
-    const bool down = clockwise;
-    keycode = down ? kHidKeyArrowDown : kHidKeyArrowUp;
-    vertical_feedback = down ? 1 : -1;
-  } else {
-    const bool right = clockwise;
-    keycode = right ? kHidKeyArrowRight : kHidKeyArrowLeft;
-    horizontal_feedback = right ? 1 : -1;
-  }
-
-  ESP_LOGD(kTag,
-           "ENC_CURSOR axis=%s direction=%s keycode=0x%02X",
-           encoder_scroll_axis_name(axis),
-           clockwise ? "clockwise" : "counter_clockwise",
-           static_cast<unsigned>(keycode));
-  const int taps = std::clamp(encoder_step_count(event.encoder_step),
-                              1,
-                              kEncoderCursorMaxTapsPerEvent);
-  show_encoder_scroll_feedback(app, vertical_feedback, horizontal_feedback, millis());
-  tap_keyboard_keycode(app, event.input, keycode, taps);
+  app->leds.show_scroll_event(direction, 0, now_ms);
 }
 
 void dispatch_encoder_rotation(AppContext* app, const easy_input::InputEvent& event) {
-  const auto& config = app->config_state.encoder_scroll();
-  if (!config.enabled) {
+  if (event.encoder_step == 0) {
     return;
   }
-
-  const auto axis = active_encoder_axis(app, config);
-  if (config.mode == ai_keyboard::EncoderRotationMode::Cursor) {
-    dispatch_encoder_cursor(app, event, axis);
+  const bool clockwise = event.encoder_step < 0;
+  const auto now_ms = millis();
+#if defined(EASY_INPUT_SPEAKER_DIAGNOSTIC) || \
+    defined(EASY_INPUT_SPEAKER_ASSETS_PRODUCT)
+  const auto previous = app->speaker_volume_level;
+  const auto adjusted =
+      ai_keyboard::adjust_speaker_volume_for_wired_encoder_step(
+          previous, event.encoder_step);
+  if (adjusted == previous) {
     return;
   }
-  dispatch_encoder_scroll(app, event, axis);
+  app->speaker_volume_level = adjusted;
+  app->speaker.set_volume_level(adjusted);
+  app->speaker_volume_dirty = true;
+  app->speaker_volume_changed_ms = now_ms;
+  ESP_LOGI(kTag,
+           "ENC_BOARD_VOLUME direction=%s steps=%d level=%u percent=%u",
+           clockwise ? "clockwise_up" : "counter_clockwise_down",
+           encoder_step_count(event.encoder_step),
+           static_cast<unsigned>(adjusted),
+           static_cast<unsigned>(adjusted) * 10U);
+  show_encoder_volume_feedback(app, clockwise ? 1 : -1, now_ms);
+#else
+  static_cast<void>(app);
+  static_cast<void>(clockwise);
+  static_cast<void>(now_ms);
+#endif
 }
 
-void toggle_encoder_scroll_axis(AppContext* app) {
-  app->encoder_scroll_axis =
-      app->encoder_scroll_axis == ai_keyboard::EncoderScrollAxis::Vertical
-          ? ai_keyboard::EncoderScrollAxis::Horizontal
-          : ai_keyboard::EncoderScrollAxis::Vertical;
+void persist_pending_speaker_volume(AppContext* app, std::uint32_t now_ms) {
+#if defined(EASY_INPUT_SPEAKER_DIAGNOSTIC) || \
+    defined(EASY_INPUT_SPEAKER_ASSETS_PRODUCT)
+  if (!app->speaker_volume_dirty ||
+      now_ms - app->speaker_volume_changed_ms < kSpeakerVolumePersistDelayMs) {
+    return;
+  }
+  esp_err_t error = ESP_OK;
+  if (!app->config_store.save_speaker_volume(
+          app->speaker_volume_level, &error)) {
+    ESP_LOGW(kTag,
+             "speaker volume save failed level=%u: %s",
+             static_cast<unsigned>(app->speaker_volume_level),
+             esp_err_to_name(error));
+    app->speaker_volume_changed_ms = now_ms;
+    return;
+  }
+  app->speaker_volume_dirty = false;
   ESP_LOGI(kTag,
-           "ENC_%s axis=%s",
-           encoder_rotation_mode_name(app->config_state.encoder_scroll().mode),
-           encoder_scroll_axis_name(app->encoder_scroll_axis));
+           "speaker volume saved level=%u percent=%u",
+           static_cast<unsigned>(app->speaker_volume_level),
+           static_cast<unsigned>(app->speaker_volume_level) * 10U);
+#else
+  static_cast<void>(app);
+  static_cast<void>(now_ms);
+#endif
 }
 
 void sync_encoder_scroll_axis(AppContext* app) {
@@ -2656,7 +2426,7 @@ bool speaker_asset_resource_steps_allowed(
       !app->held_keyboard.empty() ||
       app->keyboard_delivery.pending() ||
       app->ble.input_delivery_pending() ||
-      has_pending_wheel_report(app) ||
+      has_pending_encoder_work(app) ||
       (app->last_input_ms != 0U &&
        now_ms - app->last_input_ms <
            kSpeakerAssetsInputQuietMs)) {
@@ -3331,6 +3101,25 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(app.peripheral_power.begin_awake());
   app.last_activity_ms = millis();
   ESP_ERROR_CHECK(easy_input::initialize_nvs_storage());
+#if defined(EASY_INPUT_SPEAKER_DIAGNOSTIC) || \
+    defined(EASY_INPUT_SPEAKER_ASSETS_PRODUCT)
+  esp_err_t speaker_volume_error = ESP_OK;
+  if (!app.config_store.load_speaker_volume(
+          &app.speaker_volume_level, &speaker_volume_error)) {
+    app.speaker_volume_level = ai_keyboard::kSpeakerVolumeDefault;
+    if (speaker_volume_error != ESP_ERR_NVS_NOT_FOUND) {
+      ESP_LOGW(kTag,
+               "speaker volume load failed; using default=%u: %s",
+               static_cast<unsigned>(app.speaker_volume_level),
+               esp_err_to_name(speaker_volume_error));
+    }
+  }
+  app.speaker.set_volume_level(app.speaker_volume_level);
+  ESP_LOGI(kTag,
+           "speaker volume loaded level=%u percent=%u",
+           static_cast<unsigned>(app.speaker_volume_level),
+           static_cast<unsigned>(app.speaker_volume_level) * 10U);
+#endif
   app.inputs.set_notify_task(xTaskGetCurrentTaskHandle());
   ESP_ERROR_CHECK(app.inputs.begin(millis()));
 #if defined(EASY_INPUT_SPEAKER_DIAGNOSTIC) || \
@@ -3450,7 +3239,7 @@ extern "C" void app_main(void) {
     // short click to arrive. Poll with a fresh timestamp so queued ISR
     // snapshots and the settling sample always stay in chronological order.
     app.inputs.poll(millis(), handle_input_event, &app);
-    flush_pending_wheel_report(&app, millis());
+    persist_pending_speaker_volume(&app, millis());
 #if defined(EASY_INPUT_SPEAKER_DIAGNOSTIC) || \
     defined(EASY_INPUT_SPEAKER_ASSETS_PRODUCT)
     service_speaker(&app);

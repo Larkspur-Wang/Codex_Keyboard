@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "keyboard/audio_io_arbiter.h"
+#include "keyboard/encoder.h"
 #include "keyboard/speaker_playback.h"
 #include "keyboard/speaker_probe_status.h"
 #if defined(EASY_INPUT_SPEAKER_OPUS_DIAGNOSTIC)
@@ -37,6 +38,8 @@ class SpeakerOutput {
   esp_err_t begin(TaskHandle_t supervisor_task,
                   ai_keyboard::AudioIoArbiter* audio_io_arbiter);
   bool ready() const;
+  void set_volume_level(std::uint8_t level);
+  std::uint8_t volume_level() const;
   void mark_boot_pending(std::uint32_t microphone_generation);
   ai_keyboard::SpeakerProbeSnapshot probe_snapshot() const;
 
@@ -137,7 +140,7 @@ class SpeakerOutput {
 #endif
   esp_err_t preload_zero_dma(const std::int16_t* samples,
                              std::size_t sample_count);
-  esp_err_t write_samples(const std::int16_t* samples, std::size_t sample_count);
+  esp_err_t write_samples(std::int16_t* samples, std::size_t sample_count);
   bool cancelled(std::uint32_t generation) const;
   void publish_started(std::uint32_t generation);
   void publish_clock_ready(std::uint32_t generation);
@@ -193,6 +196,8 @@ class SpeakerOutput {
   std::atomic<std::uint32_t> completed_generation_{0};
   std::atomic<bool> shutdown_requested_{false};
   std::atomic<bool> worker_quiesced_{false};
+  std::atomic<std::uint8_t> volume_level_{
+      ai_keyboard::kSpeakerVolumeDefault};
 #if defined(EASY_INPUT_SPEAKER_OPUS_DIAGNOSTIC) || \
     defined(EASY_INPUT_SPEAKER_IMA_ADPCM_DIAGNOSTIC)
   std::atomic<std::uint32_t> request_time_us_{0};

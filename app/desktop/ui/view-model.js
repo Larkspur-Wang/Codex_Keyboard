@@ -121,3 +121,15 @@ export function sortedTasks(tasks) {
       left.name.localeCompare(right.name, "zh-CN"),
   );
 }
+
+/** @param {"offline" | "protocol_error"} connection */
+export function presentDashboardFailure(connection) {
+  const protocolError = connection === "protocol_error";
+  return {
+    taskCount: protocolError ? "状态不可用" : "Host 离线",
+    providerState: protocolError ? "Host 响应异常" : "Host 不可达",
+    asrModel: "--",
+    ttsModel: "--",
+    voice: "--",
+  };
+}

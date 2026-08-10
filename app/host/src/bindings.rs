@@ -5,9 +5,9 @@ use crate::store::{Binding, StateStore, StoreError};
 
 #[derive(Debug, Error)]
 pub enum BindingError {
-    #[error("Codex task catalog failed")]
+    #[error("Codex task catalog failed: {0}")]
     Catalog(#[from] CatalogError),
-    #[error("Host state failed")]
+    #[error("Host state failed: {0}")]
     Store(#[from] StoreError),
 }
 

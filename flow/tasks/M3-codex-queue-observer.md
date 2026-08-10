@@ -14,7 +14,7 @@
 ## 分段与提交门禁
 
 1. `M3A`：只读 Codex catalog、pin/recent 次序、归档过滤、四槽 CAS binding 与换绑语义。`complete`
-2. `M3B`：durable prompt job、每 task 严格 FIFO、全局并发 2、每 task 上限 12、stdin-only Codex runner。`complete`
+2. `M3B`：durable prompt job、每 task 严格 FIFO、全局并发 4、每 task 上限 12、stdin-only Codex runner。`complete`
 3. `M3C`：rollout path/identity/cursor、rotation/truncation、`task_complete` 去重与有界 turn pack。
    `complete`
 

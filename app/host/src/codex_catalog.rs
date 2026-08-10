@@ -29,6 +29,8 @@ const MAX_DATABASE_RECORD_BYTES: i32 = 1024 * 1024;
 const QUERY_PROGRESS_INTERVAL: i32 = 1_000;
 const MAX_QUERY_PROGRESS_CHECKS: usize = 2_000;
 const MAX_QUERY_DURATION: Duration = Duration::from_millis(150);
+const CATALOG_READ_ATTEMPTS: usize = 4;
+const CATALOG_RETRY_BASE_DELAY: Duration = Duration::from_millis(10);
 pub const MAX_PINNED_TASKS: usize = 16;
 pub const MAX_RECENT_TASKS: usize = 8;
 pub const MAX_TASK_NAME_CHARS: usize = 96;
@@ -115,6 +117,10 @@ impl CodexTaskCatalog {
     }
 
     pub fn list_tasks(&self) -> Result<Vec<CodexTask>, CatalogError> {
+        retry_catalog_read(|| self.list_tasks_once())
+    }
+
+    fn list_tasks_once(&self) -> Result<Vec<CodexTask>, CatalogError> {
         let global = read_global_state(&self.codex_home.join(".codex-global-state.json"))?;
         let index = read_session_index(&self.codex_home.join("session_index.jsonl"))?;
         let pinned_ids = pinned_ids(&global)?;
@@ -169,6 +175,30 @@ impl CodexTaskCatalog {
             .find(|task| task.task_id == task_id)
             .ok_or(CatalogError::NotAllowlisted)
     }
+}
+
+fn retry_catalog_read<T>(
+    mut operation: impl FnMut() -> Result<T, CatalogError>,
+) -> Result<T, CatalogError> {
+    for attempt in 0..CATALOG_READ_ATTEMPTS {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if !catalog_read_is_retryable(&error) => return Err(error),
+            Err(error) if attempt + 1 == CATALOG_READ_ATTEMPTS => return Err(error),
+            Err(_) => {
+                let multiplier = 1_u32 << attempt;
+                std::thread::sleep(CATALOG_RETRY_BASE_DELAY * multiplier);
+            }
+        }
+    }
+    unreachable!("catalog retry loop always returns")
+}
+
+fn catalog_read_is_retryable(error: &CatalogError) -> bool {
+    !matches!(
+        error,
+        CatalogError::IndexTooLarge | CatalogError::NotAllowlisted
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -947,6 +977,7 @@ fn ensure_path_identity_bounded(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::os::unix::fs::symlink;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{Command, Stdio};
@@ -963,6 +994,33 @@ mod tests {
     const RECENT_B: &str = "019f99ad-c6d9-7f60-a9e6-fe6640f7fd2a";
     const ARCHIVED: &str = "019f1111-1111-7111-8111-111111111111";
     const INTERNAL: &str = "019fa68f-0000-7000-8000-000000000000";
+
+    #[test]
+    fn transient_catalog_changes_retry_but_size_limits_are_terminal() {
+        let attempts = Cell::new(0_usize);
+        let value = retry_catalog_read(|| {
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            if attempt < 3 {
+                Err(CatalogError::UnsafePath)
+            } else {
+                Ok(42_u8)
+            }
+        })
+        .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(attempts.get(), 3);
+
+        attempts.set(0);
+        assert!(matches!(
+            retry_catalog_read::<()>(|| {
+                attempts.set(attempts.get() + 1);
+                Err(CatalogError::IndexTooLarge)
+            }),
+            Err(CatalogError::IndexTooLarge)
+        ));
+        assert_eq!(attempts.get(), 1);
+    }
 
     fn test_catalog(home: &Path) -> CodexTaskCatalog {
         let snapshot_root = home.join(".test-catalog-snapshots");
