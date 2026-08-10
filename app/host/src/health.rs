@@ -25,6 +25,7 @@ use crate::cache::{CacheId, CacheStore};
 use crate::codex_catalog::{CatalogError, CodexTaskCatalog};
 use crate::codex_runner::{CodexRunner, CodexRunnerConfig};
 use crate::dashscope::{ASR_MODEL, TTS_MODEL};
+use crate::lan_playback::MailboxStatus;
 #[cfg(all(target_os = "macos", not(test)))]
 use crate::lan_playback::{PLAYBACK_CHUNK_BYTES, PlaybackBegin, PlaybackIdentity};
 #[cfg(all(target_os = "macos", not(test)))]
@@ -276,6 +277,8 @@ impl HostDaemon {
         };
         #[cfg(all(target_os = "macos", not(test)))]
         let mut active_playbacks = BTreeMap::<u64, ActiveHostPlayback>::new();
+        let mut last_mailbox_status = None;
+        let mut next_mailbox_refresh = Instant::now();
         let mut result = Ok(());
         let mut observer_stopped_unexpectedly = false;
         while !shutdown.load(Ordering::Acquire) {
@@ -288,6 +291,27 @@ impl HostDaemon {
                 result = Err(io::Error::other("summary worker stopped unexpectedly").into());
                 break;
             }
+            if Instant::now() >= next_mailbox_refresh {
+                let snapshot = match self.store.mailbox_status() {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        result = Err(error.into());
+                        break;
+                    }
+                };
+                let current = MailboxStatus {
+                    unread_slots: snapshot.unread_slots,
+                    coverage_by_slot: snapshot.coverage_by_slot,
+                };
+                if last_mailbox_status != Some(current) {
+                    if !self.lan_voice.publish_mailbox_status(current) {
+                        result = Err(io::Error::other("LAN mailbox channel stopped").into());
+                        break;
+                    }
+                    last_mailbox_status = Some(current);
+                }
+                next_mailbox_refresh = Instant::now() + Duration::from_millis(250);
+            }
             for _ in 0..8 {
                 let Some(prompt) = self.lan_voice.try_recv() else {
                     break;
@@ -299,7 +323,12 @@ impl HostDaemon {
                     &prompt.request_id,
                     &prompt.transcript,
                 ) {
-                    eprintln!("lan_voice_enqueue_rejected={error}");
+                    eprintln!(
+                        "lan_voice_enqueue_rejected slot={} error={error}",
+                        prompt.slot
+                    );
+                } else {
+                    eprintln!("lan_voice_enqueued slot={}", prompt.slot);
                 }
             }
             #[cfg(all(target_os = "macos", not(test)))]
@@ -369,8 +398,8 @@ impl HostDaemon {
             Err(_) => {}
         }
         #[cfg(all(target_os = "macos", not(test)))]
-        if summary_worker.is_finished() {
-            let _ = summary_worker.join();
+        if summary_worker.join().is_err() && result.is_ok() {
+            result = Err(io::Error::other("summary worker thread panicked").into());
         }
         result
     }

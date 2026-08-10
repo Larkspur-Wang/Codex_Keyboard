@@ -145,11 +145,10 @@ DeviceTransition CodexSlotState::handle_input(ai_keyboard::InputId input,
   }
 
   if (playback_phase_ != PlaybackPhase::Idle) {
-    const bool toggles_current = playback_identity_.slot == slot;
-    transition.push(preempt_playback());
-    if (toggles_current) {
+    if (playback_identity_.slot == slot) {
       return transition;
     }
+    transition.push(preempt_playback());
   }
 
   pending_play_slot_ = slot;

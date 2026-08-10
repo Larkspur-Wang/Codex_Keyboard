@@ -76,6 +76,32 @@ using easy_input::speaker_assets::kSoundSectorSize;
 using easy_input::speaker_assets::resolve_sound_asset;
 using easy_input::speaker_assets::sound_crc32_iso_hdlc;
 
+struct StreamingFixture {
+  const std::vector<std::uint8_t>* encoded = nullptr;
+  std::size_t available = 0U;
+  bool fail = false;
+};
+
+SoundAssetReadResult read_streaming_fixture(
+    void* raw,
+    std::uint32_t offset,
+    std::uint8_t* destination,
+    std::size_t length) {
+  auto* fixture = static_cast<StreamingFixture*>(raw);
+  if (fixture == nullptr || fixture->encoded == nullptr ||
+      destination == nullptr || fixture->fail) {
+    return SoundAssetReadResult::IoError;
+  }
+  const auto start = static_cast<std::size_t>(offset);
+  if (start > fixture->encoded->size() ||
+      length > fixture->encoded->size() - start ||
+      start + length > fixture->available) {
+    return SoundAssetReadResult::NotReady;
+  }
+  std::copy_n(fixture->encoded->data() + start, length, destination);
+  return SoundAssetReadResult::Ok;
+}
+
 constexpr std::array<std::uint8_t, 16> kBundleDomain{{
     'E', 'A', 'S', 'Y', 'I', 'N', 'P', 'U',
     'T', '-', 'S', 'N', 'D', '-', 'V', '1',
@@ -709,6 +735,60 @@ void embedded_summary_longer_than_boot_limit_is_accepted() {
   assert(streamed_samples == decoded_samples);
 }
 
+void streaming_embedded_reader_waits_for_each_published_range() {
+  constexpr std::uint16_t frame_count = 2U;
+  constexpr std::uint32_t decoded_samples = 960U;
+  constexpr std::size_t frame_bytes = 246U;
+  std::vector<std::uint8_t> encoded(20U + frame_count * frame_bytes, 0U);
+  encoded[0U] = 'E';
+  encoded[1U] = 'I';
+  encoded[2U] = 'A';
+  encoded[3U] = 'D';
+  encoded[4U] = 1U;
+  encoded[5U] = 1U;
+  write_le32(encoded.data() + 6U, 48000U);
+  write_le16(encoded.data() + 10U, 480U);
+  write_le16(encoded.data() + 12U, frame_count);
+  write_le32(encoded.data() + 14U, decoded_samples);
+  write_le16(encoded.data() + 18U, 20U);
+  write_le16(encoded.data() + 20U, 480U);
+  write_le16(encoded.data() + 20U + frame_bytes, 480U);
+
+  StreamingFixture fixture{&encoded, 20U, false};
+  SoundAssetStreamDecoder decoder;
+  assert(decoder.open_streaming(
+             encoded.data(),
+             encoded.size(),
+             read_streaming_fixture,
+             &fixture) == SoundAssetReadResult::Ok);
+  std::array<std::int16_t, kSoundAssetFrameSamples> pcm{};
+  std::size_t samples = 99U;
+  assert(decoder.decode_next(pcm.data(), pcm.size(), &samples) ==
+         SoundAssetReadResult::NotReady);
+  assert(samples == 0U);
+  assert(decoder.next_frame_index() == 0U);
+
+  fixture.available = 20U + frame_bytes;
+  assert(decoder.decode_next(pcm.data(), pcm.size(), &samples) ==
+         SoundAssetReadResult::Ok);
+  assert(samples == 480U);
+  assert(decoder.next_frame_index() == 1U);
+
+  fixture.fail = true;
+  assert(decoder.decode_next(pcm.data(), pcm.size(), &samples) ==
+         SoundAssetReadResult::IoError);
+  assert(decoder.next_frame_index() == 1U);
+  fixture.fail = false;
+  fixture.available = encoded.size();
+  assert(decoder.decode_next(pcm.data(), pcm.size(), &samples) ==
+         SoundAssetReadResult::Ok);
+  assert(decoder.decode_next(pcm.data(), pcm.size(), &samples) ==
+         SoundAssetReadResult::End);
+  decoder.close();
+  assert(decoder.decode_next(pcm.data(), pcm.size(), &samples) ==
+         SoundAssetReadResult::NotReady);
+}
+
 }  // namespace
 
 int main() {
@@ -721,5 +801,6 @@ int main() {
   resolver_and_stream_reject_foreign_identity();
   factory_waytoagi_asset_is_frozen_and_streams_without_heap();
   embedded_summary_longer_than_boot_limit_is_accepted();
+  streaming_embedded_reader_waits_for_each_published_range();
   return 0;
 }

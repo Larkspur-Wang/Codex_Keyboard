@@ -64,6 +64,7 @@ add_library(easy_input_keyboard_core
   ../components/keyboard/src/input_test.cpp
   ../components/keyboard/src/keyboard_snapshot_delivery.cpp
   ../components/keyboard/src/keymap.cpp
+  ../components/keyboard/src/mailbox_led.cpp
   ../components/keyboard/src/platform_selection.cpp
   ../components/keyboard/src/peripheral_power_lease.cpp
   ../components/keyboard/src/power_cycle.cpp
@@ -334,6 +335,7 @@ add_test(NAME speaker_assets_runtime_tests COMMAND speaker_assets_runtime_tests)
 add_keyboard_host_test(gatt_status_snapshot_tests)
 add_keyboard_host_test(keyboard_snapshot_delivery_tests)
 add_keyboard_host_test(keymap_tests)
+add_keyboard_host_test(mailbox_led_tests)
 add_keyboard_host_test(platform_selection_tests)
 add_keyboard_host_test(peripheral_power_lease_tests)
 add_keyboard_host_test(power_cycle_tests)

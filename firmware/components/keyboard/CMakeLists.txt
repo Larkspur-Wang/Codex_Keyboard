@@ -24,6 +24,7 @@ idf_component_register(
     "src/input_test.cpp"
     "src/keyboard_snapshot_delivery.cpp"
     "src/keymap.cpp"
+    "src/mailbox_led.cpp"
     "src/platform_selection.cpp"
     "src/peripheral_power_lease.cpp"
     "src/power_cycle.cpp"

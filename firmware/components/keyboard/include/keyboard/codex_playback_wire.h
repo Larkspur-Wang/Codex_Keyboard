@@ -14,8 +14,11 @@ constexpr std::size_t kPlaybackAckBytes = 52U;
 constexpr std::size_t kPlaybackFinishedBytes = 56U;
 constexpr std::size_t kPlaybackFinishedAckBytes = 48U;
 constexpr std::size_t kPlaybackDataHeaderBytes = 40U;
+constexpr std::size_t kMailboxStatusBytes = 32U;
+constexpr std::uint8_t kMailboxStatusVersion = 2U;
 constexpr std::size_t kPlaybackChunkBytes = 1024U;
 constexpr std::size_t kPlaybackMaximumEiadBytes = 4U * 1024U * 1024U;
+constexpr std::uint64_t kPlaybackMaximumSamples = 48000ULL * 150ULL;
 
 struct PlaybackWireRequest {
   std::uint8_t slot = 0U;
@@ -56,6 +59,12 @@ struct PlaybackWireAck {
 struct PlaybackWireFinished {
   PlaybackWireIdentity identity{};
   std::uint64_t played_samples = 0U;
+};
+
+struct MailboxWireStatus {
+  std::uint8_t unread_slots = 0U;
+  std::uint32_t heartbeat_sequence = 0U;
+  std::array<std::uint8_t, 4> coverage_by_slot{};
 };
 
 bool playback_wire_identity_valid(const PlaybackWireIdentity& identity);
@@ -104,5 +113,10 @@ bool decode_playback_finished_ack(
     const std::array<std::uint8_t, 32>& key,
     PlaybackWireIdentity* identity,
     std::uint8_t* status);
+bool decode_mailbox_status(
+    const std::uint8_t* packet,
+    std::size_t packet_size,
+    const std::array<std::uint8_t, 32>& key,
+    MailboxWireStatus* status);
 
 }  // namespace easy_codex

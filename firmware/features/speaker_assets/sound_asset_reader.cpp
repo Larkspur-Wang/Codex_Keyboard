@@ -494,7 +494,8 @@ SoundAssetReadResult SoundAssetStreamDecoder::open(
     return SoundAssetReadResult::InvalidResource;
   }
 
-  storage_ = &storage;
+  source_context_ = &storage;
+  embedded_source_ = false;
   asset_ = asset;
   ready_ = true;
   return reset();
@@ -534,13 +535,32 @@ SoundAssetReadResult SoundAssetStreamDecoder::open_embedded(
     return SoundAssetReadResult::InvalidResource;
   }
 
-  embedded_data_ = encoded;
+  source_context_ = const_cast<std::uint8_t*>(encoded);
+  embedded_source_ = true;
   asset_.encoded_bytes =
       static_cast<std::uint32_t>(encoded_bytes);
   asset_.decoded_samples = decoded_samples;
   asset_.frame_count = frame_count;
   ready_ = true;
   return reset();
+}
+
+SoundAssetReadResult SoundAssetStreamDecoder::open_streaming(
+    const std::uint8_t* encoded_header,
+    std::size_t encoded_bytes,
+    SoundAssetStreamingRead read,
+    void* read_context) {
+  if (read == nullptr || read_context == nullptr) {
+    return SoundAssetReadResult::InvalidArgument;
+  }
+  const auto result = open_embedded(encoded_header, encoded_bytes);
+  if (result != SoundAssetReadResult::Ok) {
+    return result;
+  }
+  source_context_ = read_context;
+  streaming_read_ = read;
+  embedded_source_ = false;
+  return SoundAssetReadResult::Ok;
 }
 
 SoundAssetReadResult SoundAssetStreamDecoder::reset() {
@@ -554,8 +574,9 @@ SoundAssetReadResult SoundAssetStreamDecoder::reset() {
 }
 
 void SoundAssetStreamDecoder::close() {
-  storage_ = nullptr;
-  embedded_data_ = nullptr;
+  source_context_ = nullptr;
+  streaming_read_ = nullptr;
+  embedded_source_ = false;
   asset_ = {};
   next_encoded_offset_ = 0U;
   decoded_samples_ = 0U;
@@ -575,23 +596,27 @@ SoundAssetReadResult SoundAssetStreamDecoder::read_encoded(
               asset_.encoded_bytes - offset)) {
     return SoundAssetReadResult::InvalidResource;
   }
-  if (storage_ != nullptr) {
+  if (streaming_read_ != nullptr) {
+    return streaming_read_(source_context_, offset, destination, length);
+  }
+  if (source_context_ == nullptr) {
+    return SoundAssetReadResult::NotReady;
+  }
+  if (!embedded_source_) {
     std::uint32_t bank_offset = 0U;
     if (!checked_add(
             asset_.encoded_bank_offset, offset, &bank_offset)) {
       return SoundAssetReadResult::InvalidResource;
     }
     return read_exact(
-        *storage_,
+        *static_cast<SoundBankStorage*>(source_context_),
         asset_.bank,
         bank_offset,
         destination,
         length);
   }
-  if (embedded_data_ == nullptr) {
-    return SoundAssetReadResult::NotReady;
-  }
-  std::memcpy(destination, embedded_data_ + offset, length);
+  const auto* embedded_data = static_cast<const std::uint8_t*>(source_context_);
+  std::memcpy(destination, embedded_data + offset, length);
   return SoundAssetReadResult::Ok;
 }
 
@@ -604,7 +629,7 @@ SoundAssetReadResult SoundAssetStreamDecoder::decode_next(
   }
   *output_samples = 0U;
   if (!ready_ ||
-      (storage_ == nullptr && embedded_data_ == nullptr)) {
+      source_context_ == nullptr) {
     return SoundAssetReadResult::NotReady;
   }
   if (next_frame_index_ >= asset_.frame_count) {

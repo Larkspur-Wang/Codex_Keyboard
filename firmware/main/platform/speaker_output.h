@@ -57,6 +57,12 @@ class SpeakerOutput {
   bool request_embedded_asset(
       const std::uint8_t* encoded,
       std::size_t encoded_bytes);
+  bool request_streaming_asset(
+      const std::uint8_t* encoded_header,
+      std::size_t encoded_bytes,
+      std::uint64_t expected_samples,
+      speaker_assets::SoundAssetStreamingRead read,
+      void* read_context);
 #endif
 
   // Called only by the platform/main task. Worker events are folded into the

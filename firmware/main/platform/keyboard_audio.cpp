@@ -1240,6 +1240,21 @@ void KeyboardAudioLink::run_control_channel() {
     const auto command =
         ai_keyboard::parse_audio_control(receive_buffer.data(), static_cast<std::size_t>(received));
     if (!command.has_value()) {
+      easy_codex::MailboxWireStatus mailbox{};
+      if (from.sin_addr.s_addr == dest.sin_addr.s_addr &&
+          config.speaker_sync_key_valid &&
+          easy_codex::decode_mailbox_status(
+              receive_buffer.data(),
+              static_cast<std::size_t>(received),
+              config.speaker_sync_key,
+              &mailbox) &&
+          mailbox.heartbeat_sequence == heartbeat_seq - 1U) {
+        lock();
+        pending_mailbox_status_ = mailbox;
+        pending_mailbox_status_ready_ = true;
+        unlock();
+        continue;
+      }
       // 配置 JSON 直达通道:来源必须是已配置的上位机;交给主循环走
       // 与 BLE/USB 完全相同的应用+存盘+HID 回执路径。
       if (received > 2 && receive_buffer[0] == '{' &&
@@ -1510,6 +1525,22 @@ bool KeyboardAudioLink::take_pending_config(std::string* json) {
   }
   *json = std::move(pending_config_json_);
   pending_config_json_.clear();
+  unlock();
+  return true;
+}
+
+bool KeyboardAudioLink::take_pending_mailbox_status(
+    easy_codex::MailboxWireStatus* status) {
+  if (status == nullptr) {
+    return false;
+  }
+  lock();
+  if (!pending_mailbox_status_ready_) {
+    unlock();
+    return false;
+  }
+  *status = pending_mailbox_status_;
+  pending_mailbox_status_ready_ = false;
   unlock();
   return true;
 }

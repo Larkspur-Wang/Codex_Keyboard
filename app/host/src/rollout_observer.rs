@@ -675,14 +675,15 @@ fn apply_rollout_value(
                     if builder.turn_id != turn_id {
                         return Err(ObserverError::InvalidRollout);
                     }
-                    if builder.assistant.is_empty()
-                        && let Some(last) = payload
-                            .get("last_agent_message")
-                            .and_then(serde_json::Value::as_str)
-                        && !last.is_empty()
-                    {
-                        builder.push_message("assistant", last)?;
-                    }
+                    let last = payload
+                        .get("last_agent_message")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|last| !last.is_empty())
+                        .ok_or(ObserverError::InvalidRollout)?;
+                    // task_complete carries the authoritative final answer.
+                    // Discard commentary/progress messages observed earlier in the turn.
+                    builder.assistant.clear();
+                    builder.push_message("assistant", last)?;
                     let serialized = serde_json::to_string(&builder.finish()?)
                         .map_err(|_| ObserverError::InvalidRollout)?;
                     if serialized.len() > MAX_SERIALIZED_TURN_PACK_BYTES {
@@ -2343,7 +2344,7 @@ mod tests {
         let pack = store.completion_turn_pack(TURN_A).unwrap();
         assert!(pack.contains("please run tests"));
         assert!(pack.contains("[redacted-sensitive-line]"));
-        assert!(pack.contains("tests passed at commit abc123"));
+        assert!(pack.contains("duplicate fallback"));
         assert!(pack.contains("exec_command"));
         assert!(pack.contains("\"status\":\"completed\""));
         for excluded in [
@@ -2352,7 +2353,7 @@ mod tests {
             "hidden reasoning",
             "secret tool input",
             "secret tool output",
-            "duplicate fallback",
+            "tests passed at commit abc123",
         ] {
             assert!(!pack.contains(excluded));
         }
@@ -2585,14 +2586,7 @@ mod tests {
         assert!(pack.user[0].contains("USER_HEAD"));
         assert!(pack.user[0].contains("USER_TAIL"));
         assert!(pack.user[0].contains("[truncated]"));
-        assert!(pack.assistant.len() <= MAX_MESSAGES_PER_ROLE);
-        assert!(pack.assistant.last().unwrap().contains("assistant-0805"));
-        assert!(
-            !pack
-                .assistant
-                .iter()
-                .any(|text| text.contains("assistant-0000"))
-        );
+        assert_eq!(pack.assistant, ["latest assistant fallback"]);
         assert_eq!(pack.tools.len(), MAX_TOOLS);
         assert_eq!(pack.tools.first().unwrap().name, "tool-036");
         assert_eq!(pack.tools.last().unwrap().name, "tool-099");

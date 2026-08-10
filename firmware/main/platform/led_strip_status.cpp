@@ -3,6 +3,7 @@
 #include "driver/rmt_tx.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "keyboard/mailbox_led.h"
 
 namespace easy_input {
 namespace {
@@ -164,6 +165,9 @@ void StatusLedStrip::clear() {
   agent_status_active_ = false;
   agent_status_rendered_ = false;
   agent_status_expires_ms_ = 0;
+  mailbox_unread_slots_ = 0U;
+  mailbox_coverage_by_slot_ = {};
+  mailbox_status_active_ = false;
   set_all({});
   esp_err_t err = ESP_OK;
   if (ready()) {
@@ -204,6 +208,25 @@ void StatusLedStrip::set_agent_status(const ai_keyboard::AgentStatusCommand& com
     agent_status_expires_ms_ = now_ms + command.ttl_ms;
   }
 
+  idle_rendered_ = false;
+  if (!active_feedback_.active) {
+    render_background_status(now_ms);
+    idle_rendered_ = true;
+  }
+}
+
+void StatusLedStrip::set_mailbox_status(std::uint8_t unread_slots,
+                                        const std::array<std::uint8_t, 4>& coverage_by_slot,
+                                        std::uint32_t now_ms) {
+  bool valid = (unread_slots & 0xF0U) == 0U;
+  for (std::size_t index = 0U; index < coverage_by_slot.size(); ++index) {
+    const bool unread = (unread_slots & (1U << index)) != 0U;
+    valid = valid && unread == (coverage_by_slot[index] != 0U);
+  }
+  mailbox_unread_slots_ = valid ? unread_slots : 0U;
+  mailbox_coverage_by_slot_ = valid ? coverage_by_slot
+                                    : std::array<std::uint8_t, 4>{};
+  mailbox_status_active_ = valid && unread_slots != 0U;
   idle_rendered_ = false;
   if (!active_feedback_.active) {
     render_background_status(now_ms);
@@ -355,8 +378,22 @@ void StatusLedStrip::render_background_status(std::uint32_t now_ms) {
     return;
   }
 
+  if (mailbox_status_active_) {
+    render_mailbox_status();
+    flush();
+    return;
+  }
+
   agent_status_rendered_ = false;
   render_idle_status();
+}
+
+void StatusLedStrip::render_mailbox_status() {
+  const auto frame = easy_codex::mailbox_frame_for_slots(
+      mailbox_coverage_by_slot_);
+  for (std::size_t index = 0U; index < leds_.size(); ++index) {
+    leds_[index] = to_rgb(frame[index]);
+  }
 }
 
 void StatusLedStrip::render_agent_status() {

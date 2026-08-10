@@ -24,6 +24,7 @@ constexpr std::uint32_t kCancelRetryMs = 100U;
 constexpr std::uint8_t kMaximumRequestRetries = 12U;
 constexpr std::uint8_t kMaximumFinishedRetries = 120U;
 constexpr std::uint8_t kMaximumCancelRetries = 20U;
+constexpr std::size_t kStreamingPrebufferBytes = 24U * 1024U;
 
 std::uint32_t millis() {
   return static_cast<std::uint32_t>(esp_timer_get_time() / 1000);
@@ -123,6 +124,7 @@ void CodexLanPlayback::preempt(
   if (easy_codex::valid_playback_identity(slot_identity())) {
     send_ack(3U);
   }
+  stream_cancelled_.store(true, std::memory_order_release);
   phase_ = Phase::Cancelling;
   cancel_retries_ = 0U;
   cancel_acknowledged_ = false;
@@ -176,7 +178,8 @@ void CodexLanPlayback::poll() {
     }
     ++request_retries_;
     last_send_ms_ = now;
-  } else if (phase_ == Phase::Receiving &&
+  } else if ((phase_ == Phase::Receiving || phase_ == Phase::Playing) &&
+             received_bytes_ < begin_.total_bytes &&
              now - last_send_ms_ >= kReceiveTimeoutMs) {
     fail("data_timeout");
     return;
@@ -294,7 +297,10 @@ void CodexLanPlayback::receive_packets() {
                  easy_codex::kPlaybackChunkBytes +
                  easy_codex::kPlaybackAuthTagBytes>
       packet{};
-  for (std::size_t attempt = 0U; attempt < 8U; ++attempt) {
+  // Drain one complete Host send window per main-loop pass. The production
+  // lwIP UDP mailbox holds six datagrams, so the Host window and this bound
+  // remain aligned without overflowing the socket queue before this task runs.
+  for (std::size_t attempt = 0U; attempt < 6U; ++attempt) {
     sockaddr_in source{};
     socklen_t source_length = sizeof(source);
     const int received = recvfrom(
@@ -337,7 +343,7 @@ void CodexLanPlayback::handle_begin(
       decoded.request_nonce != request_.nonce) {
     return;
   }
-  if (phase_ == Phase::Receiving &&
+  if ((phase_ == Phase::Receiving || phase_ == Phase::Playing) &&
       easy_codex::playback_wire_identity_equal(decoded.identity, begin_.identity) &&
       decoded.total_bytes == begin_.total_bytes &&
       decoded.total_samples == begin_.total_samples &&
@@ -373,6 +379,8 @@ void CodexLanPlayback::handle_begin(
     return;
   }
   received_bytes_ = 0U;
+  available_bytes_.store(0U, std::memory_order_release);
+  stream_cancelled_.store(false, std::memory_order_release);
   phase_ = Phase::Receiving;
   last_send_ms_ = millis();
   if (!send_ack(0U)) {
@@ -405,7 +413,7 @@ void CodexLanPlayback::handle_data(
     }
     return;
   }
-  if (phase_ != Phase::Receiving) {
+  if (phase_ != Phase::Receiving && phase_ != Phase::Playing) {
     return;
   }
   if (data.offset != received_bytes_ ||
@@ -423,13 +431,21 @@ void CodexLanPlayback::handle_data(
   }
   std::memcpy(encoded_ + received_bytes_, data.payload, data.payload_length);
   received_bytes_ += data.payload_length;
+  available_bytes_.store(received_bytes_, std::memory_order_release);
   last_send_ms_ = millis();
   if (!send_ack(0U)) {
     fail("data_ack");
     return;
   }
-  if (received_bytes_ == begin_.total_bytes && !begin_speaker_playback()) {
+  if (phase_ == Phase::Receiving &&
+      received_bytes_ >=
+          std::min<std::size_t>(begin_.total_bytes, kStreamingPrebufferBytes) &&
+      !begin_speaker_playback()) {
     fail("speaker_start");
+    return;
+  }
+  if (received_bytes_ == begin_.total_bytes && !mark_transfer_complete()) {
+    fail("transfer_complete");
   }
 }
 
@@ -470,7 +486,12 @@ bool CodexLanPlayback::begin_speaker_playback() {
       return false;
     }
   }
-  if (!speaker_->request_embedded_asset(encoded_, begin_.total_bytes)) {
+  if (!speaker_->request_streaming_asset(
+          encoded_,
+          begin_.total_bytes,
+          begin_.total_samples,
+          &CodexLanPlayback::read_streaming_asset,
+          this)) {
     failure_diagnostic_ = static_cast<std::uint8_t>(
         10U + static_cast<std::uint8_t>(
                   speaker_->last_request_failure()));
@@ -480,22 +501,55 @@ bool CodexLanPlayback::begin_speaker_playback() {
     failure_diagnostic_ = 2U;
     return false;
   }
+  phase_ = Phase::Playing;
+  ESP_LOGI(kTag,
+           "streaming slot=%u generation=%llu buffered=%u bytes=%u samples=%llu",
+           static_cast<unsigned>(begin_.identity.slot),
+           static_cast<unsigned long long>(begin_.identity.summary_generation),
+           static_cast<unsigned>(received_bytes_),
+           static_cast<unsigned>(begin_.total_bytes),
+           static_cast<unsigned long long>(begin_.total_samples));
+  return true;
+}
+
+bool CodexLanPlayback::mark_transfer_complete() {
   const auto frame_count =
       (begin_.total_bytes + begin_.chunk_bytes - 1U) / begin_.chunk_bytes;
-  if (!slots_->mark_playback_transfer_complete(
+  if (frame_count == 0U ||
+      !slots_->mark_playback_transfer_complete(
           slot_identity(), frame_count - 1U)) {
     failure_diagnostic_ = 3U;
     speaker_->poll(false);
     return false;
   }
-  phase_ = Phase::Playing;
   ESP_LOGI(kTag,
-           "playing slot=%u generation=%llu bytes=%u samples=%llu",
+           "transfer complete slot=%u generation=%llu bytes=%u",
            static_cast<unsigned>(begin_.identity.slot),
            static_cast<unsigned long long>(begin_.identity.summary_generation),
-           static_cast<unsigned>(begin_.total_bytes),
-           static_cast<unsigned long long>(begin_.total_samples));
+           static_cast<unsigned>(begin_.total_bytes));
   return true;
+}
+
+speaker_assets::SoundAssetReadResult CodexLanPlayback::read_streaming_asset(
+    void* context,
+    std::uint32_t offset,
+    std::uint8_t* destination,
+    std::size_t length) {
+  auto* playback = static_cast<CodexLanPlayback*>(context);
+  if (playback == nullptr || destination == nullptr || length == 0U ||
+      offset > playback->begin_.total_bytes ||
+      length > static_cast<std::size_t>(playback->begin_.total_bytes - offset)) {
+    return speaker_assets::SoundAssetReadResult::InvalidArgument;
+  }
+  const auto end = static_cast<std::size_t>(offset) + length;
+  while (playback->available_bytes_.load(std::memory_order_acquire) < end) {
+    if (playback->stream_cancelled_.load(std::memory_order_acquire)) {
+      return speaker_assets::SoundAssetReadResult::IoError;
+    }
+    vTaskDelay(1U);
+  }
+  std::memcpy(destination, playback->encoded_ + offset, length);
+  return speaker_assets::SoundAssetReadResult::Ok;
 }
 
 void CodexLanPlayback::fail(const char* reason) {
@@ -528,6 +582,7 @@ void CodexLanPlayback::fail(const char* reason) {
   if (easy_codex::valid_playback_identity(slot_identity())) {
     slots_->abort_playback(slot_identity());
   }
+  stream_cancelled_.store(true, std::memory_order_release);
   phase_ = Phase::Cancelling;
   cancel_retries_ = 0U;
   cancel_acknowledged_ = false;
@@ -539,6 +594,7 @@ void CodexLanPlayback::fail(const char* reason) {
 }
 
 void CodexLanPlayback::cleanup(bool abort_slot) {
+  stream_cancelled_.store(true, std::memory_order_release);
   if (socket_ >= 0) {
     close(socket_);
     socket_ = -1;
@@ -561,6 +617,7 @@ void CodexLanPlayback::cleanup(bool abort_slot) {
   request_ = {};
   begin_ = {};
   received_bytes_ = 0U;
+  available_bytes_.store(0U, std::memory_order_release);
   request_retries_ = 0U;
   finished_retries_ = 0U;
   cancel_retries_ = 0U;

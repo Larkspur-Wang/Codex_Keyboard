@@ -555,6 +555,44 @@ bool SpeakerOutput::request_embedded_asset(
       static_cast<unsigned>(encoded_bytes));
   return true;
 }
+
+bool SpeakerOutput::request_streaming_asset(
+    const std::uint8_t* encoded_header,
+    std::size_t encoded_bytes,
+    std::uint64_t expected_samples,
+    speaker_assets::SoundAssetStreamingRead read,
+    void* read_context) {
+  last_request_failure_ = SpeakerRequestFailure::None;
+  if (!ready() || worker_task_ == nullptr || tx_channel_ == nullptr) {
+    last_request_failure_ = SpeakerRequestFailure::NotReady;
+    return false;
+  }
+  const auto ticket = playback_.request();
+  if (!ticket.accepted) {
+    last_request_failure_ = SpeakerRequestFailure::PlaybackBusy;
+    return false;
+  }
+  if (asset_decoder_.open_streaming(
+          encoded_header, encoded_bytes, read, read_context) !=
+          speaker_assets::SoundAssetReadResult::Ok ||
+      expected_samples == 0U ||
+      expected_samples > speaker_assets::kEmbeddedSoundAssetMaximumSamples ||
+      asset_decoder_.asset().decoded_samples != expected_samples) {
+    last_request_failure_ = SpeakerRequestFailure::InvalidAsset;
+    playback_.cancel(ticket.generation);
+    playback_.mark_drained(ticket.generation);
+    return false;
+  }
+  if (!submit_open_asset_request(ticket.generation)) {
+    return false;
+  }
+  ESP_LOGI(
+      kTag,
+      "streaming asset sound requested generation=%lu encoded=%u",
+      static_cast<unsigned long>(ticket.generation),
+      static_cast<unsigned>(encoded_bytes));
+  return true;
+}
 #endif
 
 void SpeakerOutput::poll(bool playback_allowed) {

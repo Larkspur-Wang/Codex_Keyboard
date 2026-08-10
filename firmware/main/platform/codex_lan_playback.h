@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -16,8 +17,9 @@
 namespace easy_input {
 
 // Main-task-owned LAN playback receiver. Network packets are authenticated
-// before allocation or state mutation. A complete bounded EIAD generation is
-// held in PSRAM while the existing streaming decoder/I2S worker consumes it.
+// before allocation or state mutation. The bounded EIAD generation has a
+// PSRAM backing, but playback starts after a small authenticated prebuffer and
+// the decoder waits only for ranges that have not arrived yet.
 class CodexLanPlayback {
  public:
   esp_err_t begin(KeyboardAudioLink* audio,
@@ -52,6 +54,12 @@ class CodexLanPlayback {
   void handle_data(const std::uint8_t* packet, std::size_t length);
   void handle_finished_ack(const std::uint8_t* packet, std::size_t length);
   bool begin_speaker_playback();
+  bool mark_transfer_complete();
+  static speaker_assets::SoundAssetReadResult read_streaming_asset(
+      void* context,
+      std::uint32_t offset,
+      std::uint8_t* destination,
+      std::size_t length);
   void fail(const char* reason);
   void cleanup(bool abort_slot);
   bool source_is_host(std::uint32_t address) const;
@@ -73,6 +81,8 @@ class CodexLanPlayback {
   std::uint8_t* encoded_ = nullptr;
   std::array<std::uint8_t, easy_codex::kPlaybackChunkBytes> decrypted_chunk_{};
   std::size_t received_bytes_ = 0U;
+  std::atomic<std::size_t> available_bytes_{0U};
+  std::atomic<bool> stream_cancelled_{true};
   std::uint32_t last_send_ms_ = 0U;
   std::uint8_t request_retries_ = 0U;
   std::uint8_t finished_retries_ = 0U;

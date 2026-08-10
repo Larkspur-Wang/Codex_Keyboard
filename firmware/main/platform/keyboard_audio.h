@@ -16,6 +16,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "keyboard/audio_session.h"
+#include "keyboard/codex_playback_wire.h"
 #if defined(EASY_INPUT_SPEAKER_DIAGNOSTIC) || \
     defined(EASY_INPUT_SPEAKER_ASSETS_PRODUCT)
 #include "keyboard/audio_io_arbiter.h"
@@ -113,6 +114,8 @@ class KeyboardAudioLink {
   void prepare_for_audio_trigger();
   // Wi-Fi UDP 通道收到的 JSON 配置(与 BLE/USB 同一消费路径,app_main 轮询)。
   bool take_pending_config(std::string* json);
+  bool take_pending_mailbox_status(
+      easy_codex::MailboxWireStatus* status);
   // light sleep 门控:Wi-Fi 已连接或正在流式才禁睡;深闲释放后恢复可睡。
   bool wifi_active_or_streaming() const;
   KeyboardWifiServiceSnapshot wifi_service_snapshot() const;
@@ -247,6 +250,8 @@ class KeyboardAudioLink {
   ai_keyboard::AudioIoArbiter* audio_io_arbiter_ = nullptr;
 #endif
   std::string pending_config_json_;
+  easy_codex::MailboxWireStatus pending_mailbox_status_{};
+  bool pending_mailbox_status_ready_ = false;
   EventGroupHandle_t wifi_events_ = nullptr;
   esp_netif_t* wifi_netif_ = nullptr;
   i2s_chan_handle_t mic_rx_ = nullptr;

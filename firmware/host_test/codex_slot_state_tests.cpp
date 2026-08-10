@@ -225,6 +225,29 @@ void playback_abort_requires_the_exact_active_identity() {
   assert(state.playback_phase() == PlaybackPhase::Idle);
 }
 
+void repeated_same_play_key_is_idempotent_during_request_and_playback() {
+  CodexSlotState state;
+  const auto requested = state.handle_input(
+      InputId::Key5, InputPhase::Pressed, 23);
+  assert(requested.count == 1);
+  assert(requested.actions[0].kind == DeviceActionKind::PlayRequested);
+
+  const PlaybackBegin begin{
+      identity(1, 31, 32, 23),
+      requested.actions[0].request_generation,
+      1,
+      320,
+  };
+  assert(state.begin_playback(begin) == PlaybackBeginResult::Accepted);
+  assert(state.handle_input(
+             InputId::Key5, InputPhase::Pressed, 23).count == 0);
+  assert(state.playback_phase() == PlaybackPhase::Buffering);
+  assert(state.mark_playback_started(begin.identity));
+  assert(state.handle_input(
+             InputId::Key5, InputPhase::Pressed, 23).count == 0);
+  assert(state.playback_phase() == PlaybackPhase::Playing);
+}
+
 void disconnect_invalidates_only_the_matching_transport_generation() {
   CodexSlotState state;
   const auto begin = request_playback(
@@ -361,6 +384,7 @@ int main() {
   ptt_has_absolute_priority_without_cross_slot_release();
   playback_requires_exact_generation_frames_samples_and_ack();
   playback_abort_requires_the_exact_active_identity();
+  repeated_same_play_key_is_idempotent_during_request_and_playback();
   disconnect_invalidates_only_the_matching_transport_generation();
   offline_ptt_still_preempts_playback_without_starting_capture();
   one_thousand_seeded_traces_preserve_slot_invariants();

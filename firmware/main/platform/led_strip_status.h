@@ -41,6 +41,9 @@ class StatusLedStrip {
   void show_pixel(std::size_t index, Rgb color);
   void set_agent_status(const ai_keyboard::AgentStatusCommand& command,
                         std::uint32_t now_ms);
+  void set_mailbox_status(std::uint8_t unread_slots,
+                          const std::array<std::uint8_t, 4>& coverage_by_slot,
+                          std::uint32_t now_ms);
   void show_scroll_event(std::int8_t vertical,
                          std::int8_t horizontal,
                          std::uint32_t now_ms);
@@ -55,6 +58,7 @@ class StatusLedStrip {
   bool agent_status_valid(std::uint32_t now_ms) const;
   void render_background_status(std::uint32_t now_ms);
   void render_agent_status();
+  void render_mailbox_status();
   void render_idle_status();
   void set_all(Rgb color);
   void render_active_effect();
@@ -76,6 +80,9 @@ class StatusLedStrip {
   std::uint32_t agent_status_expires_ms_ = 0;
   bool agent_status_active_ = false;
   bool agent_status_rendered_ = false;
+  std::uint8_t mailbox_unread_slots_ = 0U;
+  std::array<std::uint8_t, 4> mailbox_coverage_by_slot_{};
+  bool mailbox_status_active_ = false;
   bool idle_rendered_ = false;
 };
 

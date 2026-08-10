@@ -71,7 +71,7 @@ fn spark_parent_sigkill_helper() {
         previous_unread: None,
         completions: vec![PendingSummaryCompletion {
             completion_id: "00000000-0000-4000-8000-000000000002".into(),
-            turn_pack: r#"{"public":"start"}"#.into(),
+            turn_pack: r#"{"v":1,"turn_id":"00000000-0000-4000-8000-000000000002","user":[],"assistant":["start"],"tools":[]}"#.into(),
         }],
     };
     let _ = runner.run(&claim, None);
@@ -249,7 +249,7 @@ fn spark_supervisor_kills_cli_group_after_host_sigkill() {
         previous_unread: None,
         completions: vec![PendingSummaryCompletion {
             completion_id: "00000000-0000-4000-8000-000000000002".into(),
-            turn_pack: r#"{"public":"recover"}"#.into(),
+            turn_pack: r#"{"v":1,"turn_id":"00000000-0000-4000-8000-000000000002","user":[],"assistant":["recover"],"tools":[]}"#.into(),
         }],
     };
     assert_eq!(busy_runner.run(&claim, None), Err(SparkError::Busy));

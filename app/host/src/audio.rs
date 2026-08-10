@@ -2,7 +2,7 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 pub const TTS_SAMPLE_RATE: u32 = 48_000;
-pub const MAX_TTS_SECONDS: u32 = 90;
+pub const MAX_TTS_SECONDS: u32 = 150;
 pub const EIAD_FRAME_SAMPLES: usize = 960;
 
 const DEVICE_EIAD_FRAME_SAMPLES: usize = 480;
@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_empty_odd_and_over_ninety_second_pcm_are_rejected() {
+    fn malformed_empty_odd_and_over_duration_limit_pcm_are_rejected() {
         assert!(matches!(encode_tts_audio(&[]), Err(AudioError::InvalidPcm)));
         assert!(matches!(
             encode_tts_audio(&[0]),
@@ -666,6 +666,17 @@ mod tests {
             encode_tts_audio(&oversized),
             Err(AudioError::InvalidPcm)
         ));
+    }
+
+    #[test]
+    fn one_hundred_fifty_second_boundary_fits_the_device_container() {
+        let boundary_samples = TTS_SAMPLE_RATE as usize * MAX_TTS_SECONDS as usize;
+        let boundary = vec![0_u8; boundary_samples * 2];
+        assert_eq!(validate_pcm(&boundary).unwrap(), boundary_samples as u64);
+        let frames = boundary_samples.div_ceil(DEVICE_EIAD_FRAME_SAMPLES);
+        let maximum_device_bytes = DEVICE_EIAD_HEADER_BYTES
+            + frames * (DEVICE_EIAD_FRAME_HEADER_BYTES + DEVICE_EIAD_FRAME_SAMPLES.div_ceil(2));
+        assert!(maximum_device_bytes < 4 * 1024 * 1024);
     }
 
     #[test]

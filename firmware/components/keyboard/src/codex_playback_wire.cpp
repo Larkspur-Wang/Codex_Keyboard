@@ -301,6 +301,7 @@ bool decode_playback_begin(const std::uint8_t* packet,
             get_u16(packet, 44U), get_u64(packet, 48U)};
   return playback_wire_identity_valid(begin->identity) && begin->total_bytes != 0U &&
          begin->total_bytes <= kPlaybackMaximumEiadBytes && begin->total_samples != 0U &&
+         begin->total_samples <= kPlaybackMaximumSamples &&
          begin->chunk_bytes != 0U && begin->chunk_bytes <= kPlaybackChunkBytes &&
          begin->request_nonce != 0U;
 }
@@ -383,6 +384,32 @@ bool decode_playback_finished_ack(const std::uint8_t* packet,
   *identity = decode_identity(packet);
   *status = packet[6U];
   return playback_wire_identity_valid(*identity) && *status <= 1U;
+}
+
+bool decode_mailbox_status(const std::uint8_t* packet,
+                           std::size_t packet_size,
+                           const std::array<std::uint8_t, 32>& key,
+                           MailboxWireStatus* status) {
+  if (status == nullptr || packet_size != kMailboxStatusBytes ||
+      !magic_matches(packet, "EIMB") || packet[4U] != kMailboxStatusVersion ||
+      !authenticate(packet, packet_size, key) ||
+      !reserved_zero(packet, 6U, 8U)) {
+    return false;
+  }
+  status->unread_slots = packet[5U];
+  status->heartbeat_sequence = get_u32(packet, 8U);
+  std::copy_n(packet + 12U, status->coverage_by_slot.size(),
+              status->coverage_by_slot.begin());
+  if ((status->unread_slots & 0xF0U) != 0U) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < status->coverage_by_slot.size(); ++index) {
+    const bool unread = (status->unread_slots & (1U << index)) != 0U;
+    if (unread != (status->coverage_by_slot[index] != 0U)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace easy_codex

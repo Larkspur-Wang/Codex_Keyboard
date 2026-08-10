@@ -147,6 +147,12 @@ pub struct Binding {
     pub generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MailboxStatusSnapshot {
+    pub unread_slots: u8,
+    pub coverage_by_slot: [u8; 4],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolloutCursor {
     pub task_id: String,
@@ -1151,6 +1157,32 @@ impl StateStore {
             return Err(StoreError::InvalidSummaryRequest);
         }
         query_current_unread(&self.connection, task_id)
+    }
+
+    pub fn mailbox_status(&self) -> Result<MailboxStatusSnapshot, StoreError> {
+        let mut status = MailboxStatusSnapshot::default();
+        for binding in self.bindings()? {
+            let Some(unread) = self.current_unread_summary(&binding.task_id)? else {
+                continue;
+            };
+            let index = usize::from(binding.slot - 1);
+            status.unread_slots |= 1_u8 << index;
+            status.coverage_by_slot[index] =
+                u8::try_from(unread.coverage_count.min(u32::from(u8::MAX)))
+                    .map_err(|_| StoreError::InvalidSummaryState)?;
+        }
+        if status
+            .coverage_by_slot
+            .iter()
+            .enumerate()
+            .any(|(index, coverage)| {
+                let unread = status.unread_slots & (1_u8 << index) != 0;
+                unread != (*coverage != 0)
+            })
+        {
+            return Err(StoreError::InvalidSummaryState);
+        }
+        Ok(status)
     }
 
     pub fn acquire_summary_playback(
@@ -3355,6 +3387,52 @@ mod tests {
             )
             .unwrap();
         assert_eq!(covered, (3, 1));
+    }
+
+    #[test]
+    fn mailbox_status_deduplicates_tasks_tracks_coverage_and_clears_when_heard() {
+        const TASK: &str = "019fa972-5cfa-75e1-9008-0b17ade9a347";
+        const FIRST: &str = "019fa972-5cfa-75e1-9008-0b17ade9a348";
+        const SECOND: &str = "019fa972-5cfa-75e1-9008-0b17ade9a349";
+        let temp = tempdir().unwrap();
+        let mut store = StateStore::open(&temp.path().join("state.sqlite3")).unwrap();
+        store.set_binding(1, None, TASK).unwrap();
+        store.set_binding(3, None, TASK).unwrap();
+        assert_eq!(
+            store.mailbox_status().unwrap(),
+            MailboxStatusSnapshot::default()
+        );
+
+        insert_summary_completion(&store, TASK, FIRST, r#"{"turn":1}"#);
+        let first = claimed(store.claim_summary(TASK, "mailbox-1").unwrap());
+        let first_cache = CacheId::for_task(TASK, 1).unwrap().reference();
+        store.publish_summary(&first, &first_cache).unwrap();
+        assert_eq!(
+            store.mailbox_status().unwrap(),
+            MailboxStatusSnapshot {
+                unread_slots: 0b0101,
+                coverage_by_slot: [1, 0, 1, 0],
+            }
+        );
+
+        insert_summary_completion(&store, TASK, SECOND, r#"{"turn":2}"#);
+        let second = claimed(store.claim_summary(TASK, "mailbox-2").unwrap());
+        let second_cache = CacheId::for_task(TASK, 2).unwrap().reference();
+        store.publish_summary(&second, &second_cache).unwrap();
+        assert_eq!(
+            store.mailbox_status().unwrap().coverage_by_slot,
+            [2, 0, 2, 0]
+        );
+
+        let lease = store
+            .acquire_summary_playback(1, 1, 1, 41)
+            .unwrap()
+            .unwrap();
+        assert!(store.finish_summary_playback(&lease).unwrap());
+        assert_eq!(
+            store.mailbox_status().unwrap(),
+            MailboxStatusSnapshot::default()
+        );
     }
 
     #[test]

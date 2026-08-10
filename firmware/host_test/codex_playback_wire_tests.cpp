@@ -19,6 +19,14 @@ constexpr std::array<std::uint8_t, easy_codex::kPlaybackRequestBytes>
         0x70, 0x5b, 0xc6, 0x69, 0x24, 0xa7, 0xa3, 0x5b,
     }};
 
+constexpr std::array<std::uint8_t, easy_codex::kMailboxStatusBytes>
+    kMailboxGolden{{
+        0x45, 0x49, 0x4d, 0x42, 0x02, 0x05, 0x00, 0x00,
+        0x44, 0x33, 0x22, 0x11, 0x07, 0x00, 0x02, 0x00,
+        0x0e, 0xd9, 0x0e, 0x14, 0x2c, 0x64, 0x33, 0x4f,
+        0xd4, 0xf0, 0xc1, 0x86, 0xc9, 0x49, 0x70, 0xa0,
+    }};
+
 std::uint8_t hex_nibble(char value) {
   if (value >= '0' && value <= '9') {
     return static_cast<std::uint8_t>(value - '0');
@@ -171,11 +179,29 @@ void replayed_data_must_match_the_received_prefix() {
       replay, received.data(), received.size()));
 }
 
+void mailbox_status_matches_rust_golden_and_fails_closed() {
+  std::array<std::uint8_t, 32> key{};
+  key.fill(0x11U);
+  easy_codex::MailboxWireStatus status{};
+  assert(easy_codex::decode_mailbox_status(
+      kMailboxGolden.data(), kMailboxGolden.size(), key, &status));
+  assert(status.unread_slots == 0x05U);
+  assert(status.heartbeat_sequence == 0x11223344U);
+  assert((status.coverage_by_slot ==
+          std::array<std::uint8_t, 4>{7U, 0U, 2U, 0U}));
+
+  auto tampered = kMailboxGolden;
+  tampered[12U] ^= 1U;
+  assert(!easy_codex::decode_mailbox_status(
+      tampered.data(), tampered.size(), key, &status));
+}
+
 }  // namespace
 
 int main() {
   request_matches_rust_golden_and_authenticates();
   host_packets_decode_and_device_packets_encode();
   replayed_data_must_match_the_received_prefix();
+  mailbox_status_matches_rust_golden_and_fails_closed();
   return 0;
 }

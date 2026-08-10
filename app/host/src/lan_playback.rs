@@ -15,6 +15,8 @@ const ACK_BYTES: usize = 52;
 const FINISHED_BYTES: usize = 56;
 const FINISHED_ACK_BYTES: usize = 48;
 const DATA_HEADER_BYTES: usize = 40;
+pub const MAILBOX_STATUS_BYTES: usize = 32;
+pub const MAILBOX_STATUS_VERSION: u8 = 2;
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackWireError {
@@ -61,6 +63,12 @@ pub struct PlaybackAck {
 pub struct PlaybackFinished {
     pub identity: PlaybackIdentity,
     pub played_samples: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MailboxStatus {
+    pub unread_slots: u8,
+    pub coverage_by_slot: [u8; 4],
 }
 
 pub fn encode_request(request: PlaybackRequest, key: &[u8; 32]) -> Vec<u8> {
@@ -280,6 +288,57 @@ pub fn decode_finished_ack(
     Ok((identity, packet[6]))
 }
 
+pub fn encode_mailbox_status(
+    status: MailboxStatus,
+    heartbeat_sequence: u32,
+    key: &[u8; 32],
+) -> Result<Vec<u8>, PlaybackWireError> {
+    if !valid_mailbox_status(status) {
+        return Err(PlaybackWireError::Malformed);
+    }
+    let mut packet = vec![0_u8; MAILBOX_STATUS_BYTES];
+    packet[..4].copy_from_slice(b"EIMB");
+    packet[4] = MAILBOX_STATUS_VERSION;
+    packet[5] = status.unread_slots;
+    put_u32(&mut packet, 8, heartbeat_sequence);
+    packet[12..16].copy_from_slice(&status.coverage_by_slot);
+    sign(&mut packet, key);
+    Ok(packet)
+}
+
+pub fn decode_mailbox_status(
+    packet: &[u8],
+    key: &[u8; 32],
+) -> Result<(MailboxStatus, u32), PlaybackWireError> {
+    if packet.len() != MAILBOX_STATUS_BYTES
+        || packet[..4] != *b"EIMB"
+        || packet[4] != MAILBOX_STATUS_VERSION
+    {
+        return Err(PlaybackWireError::Malformed);
+    }
+    verify(packet, key)?;
+    let status = MailboxStatus {
+        unread_slots: packet[5],
+        coverage_by_slot: packet[12..16].try_into().unwrap(),
+    };
+    if packet[6..8] != [0, 0] || !valid_mailbox_status(status) {
+        return Err(PlaybackWireError::Malformed);
+    }
+    Ok((status, get_u32(packet, 8)))
+}
+
+fn valid_mailbox_status(status: MailboxStatus) -> bool {
+    status.unread_slots & !0x0F == 0
+        && status
+            .coverage_by_slot
+            .iter()
+            .enumerate()
+            .all(|(index, coverage)| {
+                let unread = status.unread_slots & (1_u8 << index) != 0;
+                unread == (*coverage != 0)
+            })
+}
+
 fn encode_identity(packet: &mut [u8], identity: PlaybackIdentity) {
     put_u32(packet, 8, identity.request_generation);
     put_u32(packet, 12, identity.connection_generation);
@@ -453,6 +512,27 @@ mod tests {
             (identity(), 0)
         );
 
+        let mailbox = MailboxStatus {
+            unread_slots: 0b0101,
+            coverage_by_slot: [7, 0, 2, 0],
+        };
+        let mailbox_packet = encode_mailbox_status(mailbox, 0x1122_3344, &key).unwrap();
+        assert_eq!(
+            decode_mailbox_status(&mailbox_packet, &key).unwrap(),
+            (mailbox, 0x1122_3344)
+        );
+        assert!(
+            encode_mailbox_status(
+                MailboxStatus {
+                    unread_slots: 0,
+                    coverage_by_slot: [1, 0, 0, 0],
+                },
+                1,
+                &key,
+            )
+            .is_err()
+        );
+
         let mut tampered = encode_begin(begin, &key);
         tampered[32] ^= 1;
         assert_eq!(
@@ -520,6 +600,18 @@ mod tests {
         assert_eq!(
             hex(&encode_finished_ack(identity(), 1, &key)),
             "4549504b01020100443322118877665508070605040302011817161514131211d807630e0ebf8ef128cad06c93fefb67"
+        );
+        assert_eq!(
+            hex(&encode_mailbox_status(
+                MailboxStatus {
+                    unread_slots: 0b0101,
+                    coverage_by_slot: [7, 0, 2, 0],
+                },
+                0x1122_3344,
+                &key,
+            )
+            .unwrap()),
+            "45494d420205000044332211070002000ed90e142c64334fd4f0c186c94970a0"
         );
     }
 

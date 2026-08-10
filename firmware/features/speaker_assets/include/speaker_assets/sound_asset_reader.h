@@ -16,7 +16,7 @@ inline constexpr std::uint16_t kSoundAssetFrameSamples = 480U;
 inline constexpr std::size_t kEmbeddedSoundAssetMaximumBytes =
     4U * 1024U * 1024U;
 inline constexpr std::uint32_t kEmbeddedSoundAssetMaximumSamples =
-    static_cast<std::uint32_t>(UINT16_MAX) * kSoundAssetFrameSamples;
+    kSoundAssetSampleRate * 150U;
 inline constexpr std::size_t kSoundAssetFrameHeaderBytes = 6U;
 inline constexpr std::size_t kSoundAssetMaximumFramePayloadBytes = 240U;
 inline constexpr std::size_t kSoundAssetMaximumEncodedFrameBytes =
@@ -42,6 +42,12 @@ enum class SoundAssetReadResult : std::uint8_t {
   OutputTooSmall,
   NotReady,
 };
+
+using SoundAssetStreamingRead = SoundAssetReadResult (*)(
+    void* context,
+    std::uint32_t offset,
+    std::uint8_t* destination,
+    std::size_t length);
 
 // Immutable address resolved from a manifest that was already validated by
 // SoundAssetStore. The lease identity is copied into the result so a stream
@@ -87,6 +93,15 @@ class SoundAssetStreamDecoder {
   [[nodiscard]] SoundAssetReadResult open_embedded(
       const std::uint8_t* encoded,
       std::size_t encoded_bytes);
+  // Opens an EIAD resource whose authenticated bytes become readable while
+  // playback is already running. The first 20-byte header must be present at
+  // open time; later reads are delegated to the caller and may wait for the
+  // corresponding sequential network range.
+  [[nodiscard]] SoundAssetReadResult open_streaming(
+      const std::uint8_t* encoded_header,
+      std::size_t encoded_bytes,
+      SoundAssetStreamingRead read,
+      void* read_context);
   [[nodiscard]] SoundAssetReadResult reset();
   [[nodiscard]] SoundAssetReadResult decode_next(
       std::int16_t* output,
@@ -107,12 +122,13 @@ class SoundAssetStreamDecoder {
       std::uint8_t* destination,
       std::size_t length);
 
-  SoundBankStorage* storage_ = nullptr;
-  const std::uint8_t* embedded_data_ = nullptr;
+  void* source_context_ = nullptr;
+  SoundAssetStreamingRead streaming_read_ = nullptr;
   SoundResolvedAsset asset_{};
   std::uint32_t next_encoded_offset_ = 0U;
   std::uint32_t decoded_samples_ = 0U;
   std::uint16_t next_frame_index_ = 0U;
+  bool embedded_source_ = false;
   bool ready_ = false;
   std::array<std::uint8_t, kSoundAssetMaximumEncodedFrameBytes>
       encoded_frame_{};

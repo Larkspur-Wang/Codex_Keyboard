@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pending: vec!["Implement the isolated Spark runner.".into()],
         decisions: vec!["Keep summary plaintext out of SQLite.".into()],
         spoken_text: "The summary ledger is complete, and the isolated runner is next.".into(),
+        source_evidence: vec![],
         covers_new_completions: vec![PREVIOUS_COMPLETION.into()],
     };
     let claim = SummaryClaim {
@@ -34,6 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         completions: vec![PendingSummaryCompletion {
             completion_id: NEW_COMPLETION.into(),
             turn_pack: serde_json::json!({
+                "v": 1,
+                "turn_id": NEW_COMPLETION,
                 "user": ["Finish the isolated Spark runner and its failure tests."],
                 "assistant": ["The runner and its bounded tests are implemented."],
                 "tools": [{"name": "cargo test", "status": "passed"}]

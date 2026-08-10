@@ -19,9 +19,9 @@ use thiserror::Error;
 
 use crate::dashscope::{AsrError, DashScopeAsrClient};
 use crate::lan_playback::{
-    PLAYBACK_CHUNK_BYTES, PlaybackAck, PlaybackBegin, PlaybackFinished, PlaybackIdentity,
-    PlaybackRequest, decode_ack, decode_finished, decode_request, encode_begin, encode_data,
-    encode_finished_ack,
+    MAILBOX_STATUS_BYTES, MailboxStatus, PLAYBACK_CHUNK_BYTES, PlaybackAck, PlaybackBegin,
+    PlaybackFinished, PlaybackIdentity, PlaybackRequest, decode_ack, decode_finished,
+    decode_request, encode_begin, encode_data, encode_finished_ack, encode_mailbox_status,
 };
 use crate::paths::{AppPaths, secure_directory};
 use crate::provisioning::{load_device_secret, load_device_secret_path};
@@ -44,9 +44,14 @@ const AUTH_RELOAD_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_TRANSCRIPT_BYTES: usize = 32 * 1024;
 const PLAYBACK_RETRY: Duration = Duration::from_millis(250);
 const PLAYBACK_MAX_RETRIES: u8 = 16;
-const PLAYBACK_FINISH_TIMEOUT: Duration = Duration::from_secs(150);
-const PLAYBACK_SEND_WINDOW_CHUNKS: usize = 4;
+const PLAYBACK_FINISH_TIMEOUT: Duration =
+    Duration::from_secs(crate::audio::MAX_TTS_SECONDS as u64 + 30);
+// Production ESP-IDF config has a six-entry UDP receive mailbox. Never burst
+// more datagrams than the device can queue before its main task drains them.
+const PLAYBACK_SEND_WINDOW_CHUNKS: usize = 6;
 const PLAYBACK_FINISHED_ACK_RETENTION: Duration = Duration::from_secs(120);
+const AUTHENTICATED_HEARTBEAT_BYTES: usize = 80;
+const HEARTBEAT_AUTH_CONTEXT: &[u8] = b"EasyInput/EISD/v1";
 const DEFAULT_MODEL_SHA1: &str = "a3733eda680ef76256db5fc5dd9de8629e62c5e7";
 const MIN_MODEL_BYTES: u64 = 1024 * 1024;
 const MAX_MODEL_BYTES: u64 = 1024 * 1024 * 1024;
@@ -120,6 +125,7 @@ enum LanPlaybackCommand {
     Start(LanPlaybackStart),
     FinishAck(PlaybackIdentity),
     Cancel(PlaybackIdentity),
+    Mailbox(MailboxStatus),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,8 +310,13 @@ impl LanVoiceIngress {
                     match socket.recv_from(&mut datagram) {
                         Ok((length, source)) => {
                             let packet = &datagram[..length];
+                            let heartbeat_packet = packet.starts_with(b"EIHB");
                             let playback_packet = packet.len() >= 4 && &packet[..3] == b"EIP";
-                            if playback_packet {
+                            if heartbeat_packet {
+                                if let Some(key) = assembler.auth_key.as_ref() {
+                                    playback.handle_heartbeat(packet, source, key, &socket);
+                                }
+                            } else if playback_packet {
                                 if let Some(key) = assembler.auth_key.as_ref() {
                                     playback.ingest(
                                         packet,
@@ -405,6 +416,12 @@ impl LanVoiceIngress {
             .send(LanPlaybackCommand::Cancel(identity))
             .is_ok()
     }
+
+    pub fn publish_mailbox_status(&self, status: MailboxStatus) -> bool {
+        self.playback_commands
+            .send(LanPlaybackCommand::Mailbox(status))
+            .is_ok()
+    }
 }
 
 impl Drop for LanVoiceIngress {
@@ -470,6 +487,7 @@ struct ActivePlaybackTransfer {
     last_send: Instant,
     retry_count: u8,
     finish_deadline: Instant,
+    started_at: Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -485,6 +503,7 @@ struct ActiveLanPlayback {
     retired_finish: Option<RetiredPlaybackFinish>,
     retired_cancel: Option<RetiredPlaybackFinish>,
     accepted_requests: BTreeMap<(u8, u32), u32>,
+    mailbox_status: MailboxStatus,
 }
 
 impl ActiveLanPlayback {
@@ -523,6 +542,7 @@ impl ActiveLanPlayback {
                     last_send: Instant::now(),
                     retry_count: 0,
                     finish_deadline: Instant::now() + PLAYBACK_FINISH_TIMEOUT,
+                    started_at: Instant::now(),
                 });
                 eprintln!(
                     "lan_playback=begin_sent slot={} generation={}",
@@ -558,7 +578,51 @@ impl ActiveLanPlayback {
                     self.transfer = None;
                 }
             }
+            LanPlaybackCommand::Mailbox(status) => self.mailbox_status = status,
         }
+    }
+
+    fn handle_heartbeat(
+        &self,
+        packet: &[u8],
+        source: SocketAddr,
+        key: &[u8; 32],
+        socket: &UdpSocket,
+    ) {
+        if packet.len() != AUTHENTICATED_HEARTBEAT_BYTES
+            || packet[..4] != *b"EIHB"
+            || packet[4] != 1
+            || packet[5] & !0x03 != 0
+            || packet[6..8] != [0, 0]
+            || packet[20..24] != *b"EISD"
+            || packet[24] != 1
+            || packet[25] != 60
+            || u16::from_le_bytes(packet[26..28].try_into().unwrap()) & 0x0002 == 0
+        {
+            return;
+        }
+        let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(key) else {
+            return;
+        };
+        mac.update(HEARTBEAT_AUTH_CONTEXT);
+        mac.update(&packet[..64]);
+        let digest = mac.finalize().into_bytes();
+        let tag_difference = digest[..16]
+            .iter()
+            .zip(&packet[64..80])
+            .fold(0_u8, |difference, (expected, actual)| {
+                difference | (expected ^ actual)
+            });
+        if tag_difference != 0 {
+            return;
+        }
+        let heartbeat_sequence = u32::from_le_bytes(packet[16..20].try_into().unwrap());
+        let Ok(response) = encode_mailbox_status(self.mailbox_status, heartbeat_sequence, key)
+        else {
+            return;
+        };
+        debug_assert_eq!(response.len(), MAILBOX_STATUS_BYTES);
+        let _ = socket.send_to(&response, source);
     }
 
     fn ingest(
@@ -754,10 +818,11 @@ impl ActiveLanPlayback {
                 }
                 if transfer.acknowledged_offset == transfer.eiad.len() {
                     eprintln!(
-                        "lan_playback=transfer_complete slot={} generation={} bytes={}",
+                        "lan_playback=transfer_complete slot={} generation={} bytes={} elapsed_ms={}",
                         ack.identity.slot,
                         ack.identity.summary_generation,
-                        transfer.acknowledged_offset
+                        transfer.acknowledged_offset,
+                        transfer.started_at.elapsed().as_millis()
                     );
                     transfer.phase = PlaybackSendPhase::DeviceFinished;
                     transfer.finish_deadline = Instant::now() + PLAYBACK_FINISH_TIMEOUT;
@@ -1102,8 +1167,8 @@ impl HybridTranscriber {
             match qwen_result {
                 Ok(transcript) => {
                     eprintln!(
-                        "lan_voice_asr={} transport={}",
-                        transcript.model, transcript.transport
+                        "lan_voice_asr={} transport={} slot={}",
+                        transcript.model, transcript.transport, capture.identity.slot
                     );
                     return prompt_from_capture(&capture, transcript.text);
                 }
@@ -2174,7 +2239,7 @@ mod tests {
     }
 
     #[test]
-    fn playback_four_chunk_window_bounds_duplicate_gap_ack_retries() {
+    fn playback_six_chunk_window_bounds_duplicate_gap_ack_retries() {
         let host = UdpSocket::bind("127.0.0.1:0").unwrap();
         let device = UdpSocket::bind("127.0.0.1:0").unwrap();
         device
@@ -2188,7 +2253,7 @@ mod tests {
             summary_generation: 13,
             lease: 14,
         };
-        let eiad = vec![0x5A; PLAYBACK_CHUNK_BYTES * 5];
+        let eiad = vec![0x5A; PLAYBACK_CHUNK_BYTES * (PLAYBACK_SEND_WINDOW_CHUNKS + 1)];
         let begin = PlaybackBegin {
             identity,
             total_bytes: eiad.len() as u32,
@@ -2266,5 +2331,74 @@ mod tests {
             event_receiver.try_recv().unwrap(),
             LanPlaybackEvent::Cancelled(identity)
         );
+    }
+
+    #[test]
+    fn only_authenticated_mailbox_heartbeat_echoes_the_current_challenge() {
+        let host = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let device = UdpSocket::bind("127.0.0.1:0").unwrap();
+        device
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let playback = ActiveLanPlayback {
+            mailbox_status: MailboxStatus {
+                unread_slots: 0b1010,
+                coverage_by_slot: [0, 12, 0, 3],
+            },
+            ..Default::default()
+        };
+        let mut unsigned = [0_u8; 20];
+        unsigned[..4].copy_from_slice(b"EIHB");
+        unsigned[4] = 1;
+        unsigned[5] = 0x02;
+        unsigned[16..20].copy_from_slice(&0xA1B2_C3D4_u32.to_le_bytes());
+        playback.handle_heartbeat(
+            &unsigned,
+            device.local_addr().unwrap(),
+            &TEST_AUTH_KEY,
+            &host,
+        );
+        let mut response = [0_u8; MAILBOX_STATUS_BYTES];
+        device.set_nonblocking(true).unwrap();
+        assert!(device.recv_from(&mut response).is_err());
+        device.set_nonblocking(false).unwrap();
+
+        let mut heartbeat = [0_u8; AUTHENTICATED_HEARTBEAT_BYTES];
+        heartbeat[..4].copy_from_slice(b"EIHB");
+        heartbeat[4] = 1;
+        heartbeat[5] = 0x02;
+        heartbeat[16..20].copy_from_slice(&0xA1B2_C3D4_u32.to_le_bytes());
+        heartbeat[20..24].copy_from_slice(b"EISD");
+        heartbeat[24] = 1;
+        heartbeat[25] = 60;
+        heartbeat[26..28].copy_from_slice(&0x0002_u16.to_le_bytes());
+        let mut mac = Hmac::<Sha256>::new_from_slice(&TEST_AUTH_KEY).unwrap();
+        mac.update(HEARTBEAT_AUTH_CONTEXT);
+        mac.update(&heartbeat[..64]);
+        heartbeat[64..80].copy_from_slice(&mac.finalize().into_bytes()[..16]);
+
+        playback.handle_heartbeat(
+            &heartbeat,
+            device.local_addr().unwrap(),
+            &TEST_AUTH_KEY,
+            &host,
+        );
+
+        let (length, _) = device.recv_from(&mut response).unwrap();
+        assert_eq!(length, MAILBOX_STATUS_BYTES);
+        assert_eq!(
+            crate::lan_playback::decode_mailbox_status(&response, &TEST_AUTH_KEY).unwrap(),
+            (playback.mailbox_status, 0xA1B2_C3D4)
+        );
+
+        heartbeat[64] ^= 1;
+        playback.handle_heartbeat(
+            &heartbeat,
+            device.local_addr().unwrap(),
+            &TEST_AUTH_KEY,
+            &host,
+        );
+        device.set_nonblocking(true).unwrap();
+        assert!(device.recv_from(&mut response).is_err());
     }
 }

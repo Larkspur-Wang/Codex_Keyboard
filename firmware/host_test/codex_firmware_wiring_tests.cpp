@@ -101,7 +101,15 @@ void lower_row_playback_uses_authenticated_lan_psram_and_speaker_path() {
   assert(playback.find("deferred_slot_") != std::string::npos);
   assert(playback.find("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT") !=
          std::string::npos);
-  assert(playback.find("request_embedded_asset(encoded_, begin_.total_bytes)") !=
+  assert(playback.find("request_streaming_asset(") !=
+         std::string::npos);
+  assert(playback.find("kStreamingPrebufferBytes = 24U * 1024U") !=
+         std::string::npos);
+  assert(playback.find("available_bytes_.store(received_bytes_") !=
+         std::string::npos);
+  assert(playback.find("read_streaming_asset") !=
+         std::string::npos);
+  assert(playback.find("mark_transfer_complete()") !=
          std::string::npos);
   assert(playback.find("send_finished()") != std::string::npos);
   assert(playback.find("acknowledge_finished") != std::string::npos);
@@ -121,6 +129,28 @@ void lower_row_playback_uses_authenticated_lan_psram_and_speaker_path() {
          std::string::npos);
 }
 
+void mailbox_status_is_authenticated_and_restored_as_led_background() {
+  const auto app = read_file(
+      std::string(EASY_INPUT_REPO_ROOT) + "/main/app_main.cpp");
+  const auto audio = read_file(
+      std::string(EASY_INPUT_REPO_ROOT) +
+      "/main/platform/keyboard_audio.cpp");
+  const auto leds = read_file(
+      std::string(EASY_INPUT_REPO_ROOT) +
+      "/main/platform/led_strip_status.cpp");
+  assert(audio.find("decode_mailbox_status") != std::string::npos);
+  assert(audio.find("from.sin_addr.s_addr == dest.sin_addr.s_addr") !=
+         std::string::npos);
+  assert(audio.find("mailbox.heartbeat_sequence == heartbeat_seq - 1U") !=
+         std::string::npos);
+  assert(app.find("apply_pending_mailbox_status(&app, millis())") !=
+         std::string::npos);
+  assert(app.find("status.unread_slots, status.coverage_by_slot") !=
+         std::string::npos);
+  assert(leds.find("mailbox_frame_for_slots") != std::string::npos);
+  assert(leds.find("if (mailbox_status_active_)") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -128,5 +158,6 @@ int main() {
   normal_slot_input_uses_only_the_reconciled_generation();
   ptt_release_drains_tail_then_emits_an_authenticated_terminal();
   lower_row_playback_uses_authenticated_lan_psram_and_speaker_path();
+  mailbox_status_is_authenticated_and_restored_as_led_background();
   return 0;
 }

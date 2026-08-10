@@ -38,6 +38,7 @@ const MAX_TTS_TEXT_BYTES: usize = 64 * 1024;
 const MAX_TTS_INSTRUCTIONS_BYTES: usize = 16 * 1024;
 const MAX_TTS_PCM_BYTES: usize = TTS_SAMPLE_RATE as usize * MAX_TTS_SECONDS as usize * 2;
 const MAX_TTS_ATTEMPTS: u8 = 3;
+const MAX_TTS_CHUNK_CHARS: usize = 40;
 const MAX_TTS_SERVER_EVENTS: usize = 32_768;
 const MAX_TTS_AUDIO_DELTAS: usize = 16_384;
 const MAX_ASR_WAV_BYTES: usize = 16_000 * 2 * 90 + 44;
@@ -479,7 +480,7 @@ pub enum TtsError {
     AmbiguousAfterCommit,
     #[error("DashScope returned an invalid or out-of-order realtime event")]
     Protocol,
-    #[error("DashScope audio exceeded the 90 second limit")]
+    #[error("DashScope audio exceeded the configured duration limit")]
     AudioLimit,
 }
 
@@ -537,6 +538,28 @@ impl DashScopeTtsClient {
         Err(TtsError::Unavailable)
     }
 
+    pub fn synthesize_chunked<S: SecretStore>(
+        &self,
+        store: &S,
+        accounts: &KeychainAccounts,
+        request: TtsRequest<'_>,
+    ) -> Result<TtsAudio, TtsError> {
+        let chunks = split_tts_text(request.text, MAX_TTS_CHUNK_CHARS);
+        let mut synthesized = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            synthesized.push(self.synthesize(
+                store,
+                accounts,
+                TtsRequest {
+                    text: chunk,
+                    voice: request.voice,
+                    instructions: request.instructions,
+                },
+            )?);
+        }
+        combine_tts_audio(synthesized)
+    }
+
     fn synthesize_once(
         &self,
         secret: &SecretBytes,
@@ -573,6 +596,63 @@ impl DashScopeTtsClient {
         }
         prepare_platform(deadline).map_err(map_verification_error)
     }
+}
+
+fn split_tts_text(text: &str, max_chars: usize) -> Vec<String> {
+    debug_assert!(max_chars > 0);
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut count = 0_usize;
+    for character in text.chars() {
+        current.push(character);
+        count += 1;
+        let natural_boundary = matches!(character, '。' | '！' | '？' | '；' | '\n');
+        if count >= max_chars || (natural_boundary && count >= max_chars / 2) {
+            chunks.push(std::mem::take(&mut current));
+            count = 0;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+fn combine_tts_audio(mut chunks: Vec<TtsAudio>) -> Result<TtsAudio, TtsError> {
+    if chunks.is_empty() {
+        return Err(TtsError::InvalidRequest);
+    }
+    let first = chunks.remove(0);
+    let mut pcm = Zeroizing::new(Vec::with_capacity(first.pcm.len()));
+    pcm.extend_from_slice(&first.pcm);
+    let mut receipt = first.receipt;
+    for chunk in chunks {
+        if chunk.receipt.model != receipt.model
+            || chunk.receipt.voice != receipt.voice
+            || chunk.receipt.sample_rate != receipt.sample_rate
+            || chunk.receipt.transport != receipt.transport
+        {
+            return Err(TtsError::Protocol);
+        }
+        let combined_length = pcm
+            .len()
+            .checked_add(chunk.pcm.len())
+            .ok_or(TtsError::AudioLimit)?;
+        if combined_length > MAX_TTS_PCM_BYTES {
+            return Err(TtsError::AudioLimit);
+        }
+        pcm.extend_from_slice(&chunk.pcm);
+        receipt.samples = receipt
+            .samples
+            .checked_add(chunk.receipt.samples)
+            .ok_or(TtsError::AudioLimit)?;
+        receipt.characters = receipt
+            .characters
+            .zip(chunk.receipt.characters)
+            .map(|(left, right)| left.saturating_add(right));
+        receipt.attempts = receipt.attempts.saturating_add(chunk.receipt.attempts);
+    }
+    Ok(TtsAudio { pcm, receipt })
 }
 
 fn map_secret_error(_: SecretStoreError) -> TtsError {
@@ -999,52 +1079,61 @@ fn run_tts_session<S: Read + Write>(
             "type": "input_text_buffer.commit"
         }),
     )
-    .map_err(|_| ambiguous_after_commit())?;
+    .map_err(|_| {
+        eprintln!("tts_session=failed phase=commit_write");
+        ambiguous_after_commit()
+    })?;
 
     while !state.response_done {
         // After commit, an ambiguous disconnect must not retry and risk duplicate synthesis/billing.
-        let mut event = read_tts_event(stream, pending, &mut fragmented, true)?;
-        register_event(&mut state, &event)?;
+        let mut event = read_tts_event(stream, pending, &mut fragmented, true)
+            .map_err(|error| trace_tts_failure("response_read", &state, error))?;
+        register_event(&mut state, &event)
+            .map_err(|error| trace_tts_failure("event_registration", &state, error))?;
         let event_type = event
             .get("type")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| protocol_failure(state.request_submitted))?;
-        match event_type {
+            .ok_or_else(|| trace_tts_failure("event_type", &state, protocol_failure(true)))?
+            .to_owned();
+        let handled = match event_type.as_str() {
             "input_text_buffer.committed" => {
                 if state.committed || state.response_id.is_some() {
-                    return Err(protocol_failure(state.request_submitted));
+                    Err(protocol_failure(state.request_submitted))
+                } else {
+                    require_service_id(event.get("item_id"), true, state.request_submitted)?;
+                    state.committed = true;
+                    Ok(())
                 }
-                require_service_id(event.get("item_id"), true, state.request_submitted)?;
-                state.committed = true;
             }
-            "response.created" => parse_response_created(&event, &mut state, request.voice)?,
+            "response.created" => parse_response_created(&event, &mut state, request.voice),
             "response.output_item.added"
             | "response.content_part.added"
             | "response.content_part.done"
-            | "response.output_item.done" => validate_response_scaffold(&event, &mut state)?,
-            "response.audio.delta" => append_audio_delta(&mut event, &mut state)?,
-            "response.audio.done" => mark_audio_done(&event, &mut state)?,
-            "response.done" => mark_response_done(&event, &mut state)?,
-            "error" => return Err(classify_tts_service_error(&event, state.request_submitted)),
-            _ => return Err(protocol_failure(state.request_submitted)),
-        }
+            | "response.output_item.done" => validate_response_scaffold(&event, &mut state),
+            "response.audio.delta" => append_audio_delta(&mut event, &mut state),
+            "response.audio.done" => mark_audio_done(&event, &mut state),
+            "response.done" => mark_response_done(&event, &mut state),
+            "error" => Err(classify_tts_service_error(&event, state.request_submitted)),
+            _ => Err(protocol_failure(state.request_submitted)),
+        };
+        handled.map_err(|error| trace_tts_failure(&event_type, &state, error))?;
     }
 
-    send_client_event(
+    // response.done already proves the complete PCM and usage were received. Session teardown is
+    // best-effort so a proxy closing the completed WebSocket cannot strand a valid synthesis.
+    let finish_sent = send_client_event(
         stream,
         serde_json::json!({
             "event_id": client_event_id(),
             "type": "session.finish"
         }),
     )
-    .map_err(|_| ambiguous_after_commit())?;
-    let finished = read_tts_event(stream, pending, &mut fragmented, true)?;
-    register_event(&mut state, &finished)?;
-    if finished.get("type").and_then(serde_json::Value::as_str) != Some("session.finished") {
-        return Err(ambiguous_after_commit());
+    .is_ok();
+    if finish_sent && let Ok(finished) = read_tts_event(stream, pending, &mut fragmented, true) {
+        let _ = register_event(&mut state, &finished);
     }
-    write_masked_close(stream, &1000_u16.to_be_bytes()).map_err(|_| ambiguous_after_commit())?;
-    await_peer_close(stream, pending).map_err(|_| ambiguous_after_commit())?;
+    let _ = write_masked_close(stream, &1000_u16.to_be_bytes());
+    let _ = await_peer_close(stream, pending);
 
     let samples = u64::try_from(state.pcm.len() / 2).map_err(|_| ambiguous_after_commit())?;
     Ok(TtsAudio {
@@ -1059,6 +1148,26 @@ fn run_tts_session<S: Read + Write>(
             attempts: 1,
         },
     })
+}
+
+fn trace_tts_failure(
+    phase: &str,
+    state: &TtsSessionState,
+    failure: AttemptFailure,
+) -> AttemptFailure {
+    eprintln!(
+        "tts_session=failed phase={phase} committed={} response_created={} audio_received={} audio_done={} content_done={} item_done={} response_done={} deltas={} pcm_bytes={}",
+        state.committed,
+        state.response_id.is_some(),
+        state.received_audio,
+        state.audio_done,
+        state.content_part_done,
+        state.output_item_done,
+        state.response_done,
+        state.audio_deltas,
+        state.pcm.len()
+    );
+    failure
 }
 
 fn read_tts_event<S: Read + Write>(
@@ -1086,7 +1195,15 @@ fn read_tts_event<S: Read + Write>(
                         .map_err(|_| protocol_failure(request_submitted));
                 }
             }
-            0x8 => return Err(protocol_failure(request_submitted)),
+            0x8 => {
+                let close_code = if frame.payload.len() >= 2 {
+                    u16::from_be_bytes([frame.payload[0], frame.payload[1]])
+                } else {
+                    0
+                };
+                eprintln!("tts_session=peer_close code={close_code}");
+                return Err(protocol_failure(request_submitted));
+            }
             0x9 => write_masked_pong(stream, &frame.payload).map_err(|_| {
                 if request_submitted {
                     ambiguous_after_commit()
@@ -3052,6 +3169,50 @@ mod tests {
     }
 
     #[test]
+    fn long_tts_text_is_split_without_loss_and_combines_complete_pcm() {
+        let text = format!(
+            "{}。{}。{}",
+            "甲".repeat(MAX_TTS_CHUNK_CHARS - 1),
+            "乙".repeat(MAX_TTS_CHUNK_CHARS - 1),
+            "丙".repeat(9)
+        );
+        let chunks = split_tts_text(&text, MAX_TTS_CHUNK_CHARS);
+        assert_eq!(chunks.concat(), text);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= MAX_TTS_CHUNK_CHARS)
+        );
+
+        let audio = combine_tts_audio(
+            chunks
+                .iter()
+                .map(|chunk| {
+                    TtsAudio::from_test(
+                        vec![0, 0, 1, 0, 2, 0, 3, 0],
+                        TtsReceipt {
+                            model: TTS_MODEL,
+                            voice: "Cherry".into(),
+                            sample_rate: TTS_SAMPLE_RATE,
+                            samples: 4,
+                            characters: Some(chunk.chars().count() as u64),
+                            transport: "fake",
+                            attempts: 1,
+                        },
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(audio.pcm().len(), chunks.len() * 8);
+        assert_eq!(audio.receipt().attempts, chunks.len() as u8);
+        assert_eq!(
+            audio.receipt().characters,
+            Some(text.chars().count() as u64)
+        );
+    }
+
+    #[test]
     fn tts_http_auth_rejection_is_terminal_and_not_retried() {
         let (port, tls, peer) = spawn_tts_peer(vec![TtsServerScript::Http(403)]);
         let client = test_tts_client(port, tls);
@@ -3133,14 +3294,13 @@ mod tests {
     }
 
     #[test]
-    fn complete_response_without_session_finish_is_publicly_ambiguous() {
+    fn complete_response_is_accepted_when_only_session_cleanup_disconnects() {
         let (port, tls, peer) = spawn_tts_peer(vec![TtsServerScript::DisconnectAfterResponseDone]);
         let client = test_tts_client(port, tls);
         let (accounts, store) = tts_accounts_and_store();
-        assert!(matches!(
-            client.synthesize(&store, &accounts, request()),
-            Err(TtsError::AmbiguousAfterCommit)
-        ));
+        let audio = client.synthesize(&store, &accounts, request()).unwrap();
+        assert_eq!(audio.pcm().len(), 8);
+        assert_eq!(audio.receipt().voice, "Cherry");
         peer.join().unwrap();
     }
 

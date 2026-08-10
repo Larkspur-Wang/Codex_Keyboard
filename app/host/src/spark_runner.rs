@@ -30,9 +30,12 @@ use crate::codex_runner::{
 use crate::paths::{
     AppPaths, ExplicitFileLock, open_owned_directory_chain, open_private_file, secure_directory,
 };
-use crate::rollout_observer::redact_sensitive_text;
+use crate::rollout_observer::{TurnPack, redact_sensitive_text};
 use crate::store::{MAX_SUMMARY_COMPLETIONS_PER_CLAIM, PendingSummaryCompletion, SummaryClaim};
-use crate::summary::{MAX_SUMMARY_DOCUMENT_BYTES, SummaryDocument};
+use crate::summary::{
+    MAX_SUMMARY_DOCUMENT_BYTES, SummaryDocument, required_source_evidence_quote,
+    source_evidence_quote_budget,
+};
 
 pub const SPARK_MODEL: &str = "gpt-5.3-codex-spark";
 const DISABLED_SPARK_FEATURES: &[&str] = &[
@@ -569,7 +572,14 @@ impl SparkRunner {
 struct PromptInput<'a> {
     schema: u8,
     previous_unheard: Option<&'a SummaryDocument>,
-    new_completions: &'a [PendingSummaryCompletion],
+    new_completions: &'a [AssistantCompletion<'a>],
+}
+
+#[derive(Serialize)]
+struct AssistantCompletion<'a> {
+    completion_id: &'a str,
+    assistant_final: String,
+    required_evidence_quote: String,
 }
 
 fn validate_claim_input(
@@ -597,8 +607,7 @@ fn validate_claim_input(
             || completion.turn_pack.is_empty()
             || completion.turn_pack.len() > MAX_TURN_PACK_BYTES
             || total > MAX_TURN_PACK_TOTAL_BYTES
-            || !serde_json::from_str::<serde_json::Value>(&completion.turn_pack)
-                .is_ok_and(|value| value.is_object())
+            || !valid_assistant_turn_pack(completion)
         {
             return Err(SparkError::InvalidInput);
         }
@@ -613,7 +622,8 @@ fn build_prompt(
     claim: &SummaryClaim,
     previous_unheard: Option<&SummaryDocument>,
 ) -> Result<Zeroizing<Vec<u8>>, SparkError> {
-    const INSTRUCTIONS: &[u8] = b"Create the cumulative unread task summary from the JSON input below. Preserve useful prior facts when previous_unheard is present; incorporate every new completion exactly once; separate facts, pending work, and decisions. Write facts, pending, decisions, and especially spoken_text in natural Simplified Chinese, translating English source material when needed; keep spoken_text concise and suitable for speech. Return only the output-schema JSON. covers_new_completions must exactly equal the ordered completion_id values in new_completions. Never emit credentials, hidden reasoning, or local absolute paths.\n";
+    const INSTRUCTIONS: &[u8] = b"Create a concrete cumulative unread task summary from the JSON input below. Each new completion contains only the authoritative final assistant reply from one completed task turn. Summarize only what those assistant_final fields reported: the user-visible result, still-relevant next work, and explicit decisions. Do not invent or reconstruct user messages, tool calls, intermediate progress, tests, logs, hidden reasoning, or implementation details that are not useful to the user. For every new completion, source_evidence must contain exactly one item in the same order: copy completion_id and copy required_evidence_quote exactly into exact_quote. source_evidence is private audit metadata, not narration: do not paste required_evidence_quote into spoken_text merely to satisfy validation. When previous_unheard is present, it is required cumulative context: preserve its facts, pending, and decisions in the matching output arrays, then naturally re-summarize the still-relevant old unread content together with every new completion in one concise spoken_text. Do not copy previous spoken_text verbatim. Write spoken_text as a natural Simplified Chinese briefing of at most 480 letters, digits, or Han characters. It must be self-contained and say what was actually completed, what result matters, and any relevant next step or decision; do not merely say that a task is done. The TTS reads spoken_text exactly, so never include schema labels, evidence excerpts, validation notes, or boilerplate that a person should not hear. Return only the output-schema JSON. covers_new_completions must exactly equal the ordered completion_id values in new_completions. Never emit credentials, hidden reasoning, or local absolute paths.\n";
+    let completions = assistant_completions(claim)?;
     let mut prompt = BoundedSensitiveWriter::new(MAX_PROMPT_BYTES);
     prompt
         .write_all(INSTRUCTIONS)
@@ -623,11 +633,47 @@ fn build_prompt(
         &PromptInput {
             schema: 1,
             previous_unheard,
-            new_completions: &claim.completions,
+            new_completions: &completions,
         },
     )
     .map_err(|_| SparkError::InvalidInput)?;
     Ok(prompt.into_bytes())
+}
+
+fn valid_assistant_turn_pack(completion: &PendingSummaryCompletion) -> bool {
+    serde_json::from_str::<TurnPack>(&completion.turn_pack).is_ok_and(|pack| {
+        pack.v == 1
+            && pack.turn_id == completion.completion_id
+            && pack.assistant.len() == 1
+            && !pack.assistant[0].trim().is_empty()
+    })
+}
+
+fn assistant_completions(claim: &SummaryClaim) -> Result<Vec<AssistantCompletion<'_>>, SparkError> {
+    let quote_budget = source_evidence_quote_budget(claim.completions.len());
+    claim
+        .completions
+        .iter()
+        .map(|completion| {
+            let pack: TurnPack = serde_json::from_str(&completion.turn_pack)
+                .map_err(|_| SparkError::InvalidInput)?;
+            if pack.v != 1 || pack.turn_id != completion.completion_id {
+                return Err(SparkError::InvalidInput);
+            }
+            if pack.assistant.len() != 1 || pack.assistant[0].trim().is_empty() {
+                return Err(SparkError::InvalidInput);
+            }
+            let assistant_final = pack.assistant.into_iter().next().unwrap();
+            let required_evidence_quote =
+                required_source_evidence_quote(&assistant_final, quote_budget)
+                    .ok_or(SparkError::InvalidInput)?;
+            Ok(AssistantCompletion {
+                completion_id: &completion.completion_id,
+                assistant_final,
+                required_evidence_quote,
+            })
+        })
+        .collect()
 }
 
 fn redact_document(document: &mut SummaryDocument) {
@@ -640,6 +686,11 @@ fn redact_document(document: &mut SummaryDocument) {
         let redacted = redact_sensitive_text(value);
         value.zeroize();
         *value = redacted;
+    }
+    for evidence in &mut document.source_evidence {
+        let redacted = redact_sensitive_text(&evidence.exact_quote);
+        evidence.exact_quote.zeroize();
+        evidence.exact_quote = redacted;
     }
     let spoken_text = redact_sensitive_text(&document.spoken_text);
     document.spoken_text.zeroize();
@@ -1050,6 +1101,19 @@ fn output_schema() -> String {
             "pending": {"type": "array", "maxItems": 32, "items": {"type": "string"}},
             "decisions": {"type": "array", "maxItems": 32, "items": {"type": "string"}},
             "spoken_text": {"type": "string"},
+            "source_evidence": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "completion_id": {"type": "string"},
+                        "exact_quote": {"type": "string"}
+                    },
+                    "required": ["completion_id", "exact_quote"]
+                }
+            },
             "covers_new_completions": {
                 "type": "array",
                 "maxItems": 32,
@@ -1057,7 +1121,7 @@ fn output_schema() -> String {
             }
         },
         "required": [
-            "schema", "facts", "pending", "decisions", "spoken_text",
+            "schema", "facts", "pending", "decisions", "spoken_text", "source_evidence",
             "covers_new_completions"
         ]
     })
@@ -2375,7 +2439,9 @@ mod tests {
             previous_unread: None,
             completions: vec![PendingSummaryCompletion {
                 completion_id: COMPLETION.into(),
-                turn_pack: r#"{"public":"done"}"#.into(),
+                turn_pack: format!(
+                    r#"{{"v":1,"turn_id":"{COMPLETION}","user":["discard-me-user"],"assistant":["final assistant result"],"tools":[{{"name":"discard-me-tool","status":"completed"}}]}}"#
+                ),
             }],
         }
     }
@@ -2387,6 +2453,7 @@ mod tests {
             pending: vec!["old pending".into()],
             decisions: vec![],
             spoken_text: "old spoken summary".into(),
+            source_evidence: vec![],
             covers_new_completions: vec!["019fa972-5cfa-75e1-9008-0b17ade9a346".into()],
         }
     }
@@ -2396,8 +2463,28 @@ mod tests {
         let prompt = build_prompt(&claim(), None).unwrap();
         let prompt = std::str::from_utf8(prompt.as_slice()).unwrap();
         assert!(prompt.contains("natural Simplified Chinese"));
-        assert!(prompt.contains("translating English source material"));
-        assert!(prompt.contains("especially spoken_text"));
+        assert!(prompt.contains("required cumulative context"));
+        assert!(prompt.contains("Do not copy previous spoken_text verbatim"));
+        assert!(prompt.contains("authoritative final assistant reply"));
+        assert!(prompt.contains("final assistant result"));
+        assert!(prompt.contains("required_evidence_quote"));
+        assert!(prompt.contains("private audit metadata, not narration"));
+        assert!(prompt.contains("TTS reads spoken_text exactly"));
+        assert!(!prompt.contains("discard-me-user"));
+        assert!(!prompt.contains("discard-me-tool"));
+    }
+
+    #[test]
+    fn summary_prompt_includes_the_complete_previous_unheard_document() {
+        let previous = previous_document();
+        let prompt = build_prompt(&claim(), Some(&previous)).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(prompt.split(|byte| *byte == b'\n').nth(1).unwrap()).unwrap();
+        assert_eq!(value["previous_unheard"]["facts"][0], "old fact");
+        assert_eq!(
+            value["previous_unheard"]["spoken_text"],
+            "old spoken summary"
+        );
     }
 
     fn auth(directory: &Path) -> PathBuf {
@@ -2779,8 +2866,8 @@ sleep 0.2
         let root = tempdir().unwrap();
         let mut large_claim = claim();
         large_claim.completions[0].turn_pack = format!(
-            "{{\"public\":\"{}\"}}",
-            "x".repeat(MAX_TURN_PACK_BYTES - 20)
+            r#"{{"v":1,"turn_id":"{COMPLETION}","user":[],"assistant":["{}"],"tools":[]}}"#,
+            "x".repeat(MAX_TURN_PACK_BYTES / 2)
         );
 
         let never_reads = script(root.path(), "sleep 1");

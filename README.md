@@ -5,6 +5,7 @@ PWA、Cloudflare Relay、公网端口或远程桥。
 
 - `S1-S4`：按住说话，松开后由 Mac Host 调用 Qwen ASR，并把文本按任务 FIFO 投递到 Codex。
 - `S5-S8`：播放对应任务最新的未读总结。
+- 信箱灯：左起四灯对应槽 1-4，各槽未听 completion 越多越亮，完整听完后熄灭；第五灯不参与。
 - Mac Host：持有四槽绑定、Codex 队列、完成观察、Spark 总结、Qwen TTS 和加密音频缓存。
 - Firmware：只知道槽位号，负责 Wi-Fi 音频、麦克风、扬声器、按键、PSRAM 和 I2S。
 
@@ -25,8 +26,9 @@ PWA、Cloudflare Relay、公网端口或远程桥。
 
 ## 当前状态
 
-本地 Host、语音上行、自动总结、加密音频缓存和 LAN 播放候选已具备自动化证据。实体键盘的
-新播放镜像仍需要针对精确 SHA 单独授权烧录并完成 HIL，构建通过不能代替真实扬声器验收。
+本地 Host、语音上行、累计自动总结、150 秒加密音频缓存和 LAN 播放候选已具备自动化证据，桌面
+App 安装于 `/Applications/Codex Keyboard.app`。包含信箱灯的新固件镜像仍需要针对精确 SHA 单独
+授权烧录并完成 HIL，构建通过不能代替真实灯光和扬声器验收。
 
 ```bash
 ./scripts/eval-fast.sh

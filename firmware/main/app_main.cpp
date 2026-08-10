@@ -3002,6 +3002,23 @@ void apply_pending_agent_status(AppContext* app, std::uint32_t now_ms) {
            static_cast<unsigned long>(selected.source_hash));
 }
 
+void apply_pending_mailbox_status(AppContext* app, std::uint32_t now_ms) {
+  easy_codex::MailboxWireStatus status{};
+  if (!app->audio.take_pending_mailbox_status(&status)) {
+    return;
+  }
+  app->leds.set_mailbox_status(
+      status.unread_slots, status.coverage_by_slot, now_ms);
+  ESP_LOGI(kTag,
+           "mailbox status slots=0x%02x coverage=%u/%u/%u/%u heartbeat=%lu",
+           static_cast<unsigned>(status.unread_slots),
+           static_cast<unsigned>(status.coverage_by_slot[0]),
+           static_cast<unsigned>(status.coverage_by_slot[1]),
+           static_cast<unsigned>(status.coverage_by_slot[2]),
+           static_cast<unsigned>(status.coverage_by_slot[3]),
+           static_cast<unsigned long>(status.heartbeat_sequence));
+}
+
 bool sync_power_sample(AppContext* app, std::uint32_t now_ms, bool idle, bool force) {
   if (app->audio.streaming()) {
     return false;
@@ -3424,6 +3441,7 @@ extern "C" void app_main(void) {
     track_power_mode(&app, mode, now);
     log_power_mode_transition(&app, mode, now);
     apply_pending_config(&app);
+    apply_pending_mailbox_status(&app, millis());
     apply_pending_agent_status(&app, millis());
     reconcile_keyboard_transport_lifetimes(&app);
     reconcile_codex_route_lifetime(&app);

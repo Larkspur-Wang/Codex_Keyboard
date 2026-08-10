@@ -281,6 +281,7 @@ mod tests {
             pending: vec!["Run the composed live gate.".into()],
             decisions: vec!["Keep plaintext inside encrypted cache objects.".into()],
             spoken_text: "The realtime client and audio codecs are ready.".into(),
+            source_evidence: vec![],
             covers_new_completions: vec!["e2747337-dff1-4d99-b5af-4cb4ba09c557".into()],
         }
     }
