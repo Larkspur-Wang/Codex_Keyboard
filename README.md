@@ -40,6 +40,7 @@ PWA、Cloudflare Relay、公网端口或远程桥。
 
 ## 训练营材料
 
+- 学员手册：`docs/训练营学员手册.md`
 - PowerPoint：`projects/codex-radio_ppt169_20260810/exports/Codex任务电台_课程案例_Lark.pptx`
 - PDF：`projects/codex-radio_ppt169_20260810/exports/Codex任务电台_课程案例_Lark.pdf`
 
