@@ -35,7 +35,7 @@
 ## icons
 - library: phosphor-duotone
 - brand_library: simple-icons
-- inventory: microphone, speaker-high, wifi-high, broadcast, radio, lightbulb, keyboard, desktop, code, brackets-angle, check-circle, warning-circle, bug, arrow-right, timer, database, lock-key, shield-check, cloud-arrow-up
+- inventory: microphone, speaker-high, wifi-high, broadcast, radio, lightbulb, keyboard, desktop, code, brackets-angle, check-circle, warning-circle, bug, arrow-right, timer, database, lock-key, shield-check, cloud-arrow-up, cloud-slash, identification-badge, hard-drives, ticket, queue, flag-checkered, gear
 
 ## images
 - cover_task_radio: images/cover-task-radio.png
@@ -69,30 +69,37 @@
 - P14: breathing
 - P15: dense
 - P16: dense
-- P17: dense
-- P18: breathing
+- P17: breathing
+- P18: dense
 - P19: dense
-- P20: dense
+- P20: anchor
 - P21: anchor
 - P22: dense
 - P23: dense
 - P24: dense
 - P25: dense
 - P26: dense
-- P27: breathing
+- P27: dense
 - P28: dense
 - P29: dense
 - P30: dense
-- P31: breathing
-- P32: breathing
+- P31: dense
+- P32: dense
 - P33: dense
-- P34: anchor
+- P34: dense
 - P35: dense
 - P36: dense
 - P37: dense
-- P38: dense
-- P39: dense
+- P38: breathing
+- P39: breathing
 - P40: dense
+- P41: anchor
+- P42: dense
+- P43: dense
+- P44: dense
+- P45: dense
+- P46: dense
+- P47: dense
 
 ## forbidden
 - Mixing icon libraries
