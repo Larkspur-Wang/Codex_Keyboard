@@ -50,6 +50,7 @@
 - schematic_2: images/easyinput-v2-schematic-2.png | no-crop
 - app_dashboard: images/codex-keyboard-app-dashboard-sanitized.png | no-crop
 - app_icon: images/codex-keyboard-app-icon.png | no-crop
+- reproduce_ladder: images/reproduce-ladder.png
 
 ## page_rhythm
 - P01: anchor
@@ -68,26 +69,30 @@
 - P14: breathing
 - P15: dense
 - P16: dense
-- P17: breathing
-- P18: dense
+- P17: dense
+- P18: breathing
 - P19: dense
-- P20: anchor
-- P21: dense
+- P20: dense
+- P21: anchor
 - P22: dense
 - P23: dense
-- P24: breathing
+- P24: dense
 - P25: dense
 - P26: dense
-- P27: dense
-- P28: breathing
-- P29: breathing
-- P30: anchor
-- P31: dense
-- P32: dense
+- P27: breathing
+- P28: dense
+- P29: dense
+- P30: dense
+- P31: breathing
+- P32: breathing
 - P33: dense
-- P34: dense
+- P34: anchor
 - P35: dense
 - P36: dense
+- P37: dense
+- P38: dense
+- P39: dense
+- P40: dense
 
 ## forbidden
 - Mixing icon libraries

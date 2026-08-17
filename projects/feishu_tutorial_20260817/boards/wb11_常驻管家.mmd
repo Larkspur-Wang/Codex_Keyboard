@@ -1,0 +1,12 @@
+flowchart TD
+    subgraph MAC["你的 Mac"]
+        HOST["easy-codex-host<br/>用户级 LaunchAgent，开机自启常驻"]
+        DB["SQLite：槽位绑定 / 队列 / 未读代际 / 缓存引用"]
+        HOST --- DB
+        APP["Tauri 桌面 App<br/>遥控器①：看状态、绑槽位<br/>关掉不影响管家"]
+        CODEX["Codex 任务 ×4"]
+    end
+    KB["键盘<br/>遥控器②：按键、灯、扬声器"]
+    APP <-->|本机调用| HOST
+    KB <-->|局域网加密 UDP| HOST
+    CODEX <-->|stdin 下发 / rollout 监听| HOST

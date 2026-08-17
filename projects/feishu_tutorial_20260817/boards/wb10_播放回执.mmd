@@ -1,0 +1,13 @@
+sequenceDiagram
+    participant U as 你
+    participant K as 键盘
+    participant H as Mac Host
+    U->>K: 按 S6
+    K->>H: 请求槽 2 的当前总结
+    H->>K: 加密音频分段下发
+    K->>K: 先整段装进 PSRAM，再开始播放（防 Wi-Fi 抖动断音）
+    K->>K: 扬声器播到最后一个采样点
+    K->>H: 播放完成回执（带当前代际号）
+    H->>H: 核对代际：标记已听、删除缓存
+    H->>K: 熄灭第 2 颗灯
+    Note over U,H: 中途按住 PTT / 断电 / 失败 → 不算听过，灯保持亮

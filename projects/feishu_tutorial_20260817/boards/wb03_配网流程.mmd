@@ -1,0 +1,11 @@
+sequenceDiagram
+    participant U as 你
+    participant H as Mac Host
+    participant K as 键盘固件
+    U->>H: read -s 输入 Wi-Fi 密码（走标准输入，不留痕）
+    U->>H: provision-lan SSID + Mac 的 IPv4 + 端口 17333
+    H->>K: USB HID 管理报文（USB 不通时走 BLE GATT）
+    Note over H,K: 同时下发 device secret（通信密钥底料）
+    K->>K: 全部写入 NVS（断电不丢）
+    K-->>H: 写入确认
+    Note over K: 之后每次开机：自动连 Wi-Fi，直接找到 Mac

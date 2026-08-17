@@ -1,0 +1,18 @@
+flowchart TD
+    subgraph W["四个窗口并行，互不阻塞"]
+        direction LR
+        subgraph S1["槽 1"]
+            Q1["指令C ← 指令B ← 指令A（执行中）"]
+        end
+        subgraph S2["槽 2"]
+            Q2["空闲"]
+        end
+        subgraph S3["槽 3"]
+            Q3["指令A（执行中）"]
+        end
+        subgraph S4["槽 4"]
+            Q4["指令B ← 指令A（执行中）"]
+        end
+    end
+    L5["第 5 颗灯 = 正在运行的任务数<br/>此刻 3 个 → 紫色（0/1/2/3/4 = 绿/黄/橙/紫/红）"]
+    W -.-> L5

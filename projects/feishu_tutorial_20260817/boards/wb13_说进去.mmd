@@ -1,0 +1,2 @@
+flowchart LR
+    A["按住 S2 说话"] --> B["16 kHz 采样"] --> C["加密 UDP<br/>边说边上行"] --> D["Host 调 ASR<br/>转成文字"] --> E["进入槽 2 队列<br/>同任务严格 FIFO"] --> F["轮到时经 stdin 交给<br/>codex exec resume"] --> G["Codex 开工"] --> H["第 5 颗灯<br/>运行数 +1"]

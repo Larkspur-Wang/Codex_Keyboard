@@ -1,0 +1,12 @@
+sequenceDiagram
+    participant K as 键盘
+    participant H as Mac Host
+    Note over H: 发布一版总结，取餐号 gen=7
+    H->>K: 点亮信箱灯（gen=7）
+    Note over K: 键盘断电，稍后重连
+    Note over H: 会话翻新，当前有效代际变为 gen=8
+    K->>H: 拿旧小票来取餐（gen=7 的回执/请求）
+    H-->>K: 作废不认（fail closed）
+    H->>K: 按当前代际重新下发（gen=8）
+    K->>H: 播放完成回执（gen=8）
+    H->>H: 核对通过：标记已听、删缓存、熄灯

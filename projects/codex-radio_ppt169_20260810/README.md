@@ -3,13 +3,14 @@
 - 案例：《Codex 任务电台：一把键盘，远程开发》
 - 讲者：Lark
 - 画布：16:9，1280 × 720
-- 页数：30 页主讲 + 6 页技术附录
+- 页数：34 页主讲 + 6 页技术附录（2026-08-17 新增 4 页：三个基础词、声音变数字、安全三件套、复现路线图）
 - 创建日期：2026-08-10
 
 ## Final Deliverables
 
-- `exports/Codex任务电台_课程案例_Lark.pptx`：可编辑 PowerPoint，含 36 页演讲备注。
-- `exports/Codex任务电台_课程案例_Lark.pdf`：由浏览器逐页渲染生成的 36 页视觉预览。
+- `exports/Codex任务电台_课程案例_Lark_40页.pptx`：当前版本，40 页，含逐页演讲备注。
+- `exports/Codex任务电台_课程案例_Lark.pptx`：2026-08-10 的 36 页历史版本。
+- `exports/Codex任务电台_课程案例_Lark.pdf`：36 页历史版本的视觉预览。
 - `validation/contact-sheet-final.png`：全套页面缩略图。
 
 ## Content Boundary

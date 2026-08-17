@@ -1,0 +1,10 @@
+flowchart LR
+    subgraph F["键盘 16 MB Flash 的抽屉"]
+        direction LR
+        A["0x0<br/>bootloader<br/>开机引导"] --- B["0x8000<br/>分区表<br/>抽屉目录"] --- C["0x10000<br/>应用程序<br/>本次要换的固件"] --- D["NVS<br/>Wi-Fi / 密钥 / 音量"] --- E["音效分区<br/>开机音 / 提示音"]
+    end
+    W["烧录命令只写这三格（换家具）"] -.-> A
+    W -.-> B
+    W -.-> C
+    S["保险柜与相册：烧录不碰"] -.-> D
+    S -.-> E

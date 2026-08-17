@@ -1,0 +1,18 @@
+flowchart LR
+    KB["键盘 = 身体<br/>8 键 / 5 灯 / 麦克风 / 扬声器 / 旋钮<br/>不存任务，不懂 AI"]
+    subgraph MAC["Mac"]
+        HOST["Host = 管家<br/>状态唯一所有者"]
+        APP["桌面 App<br/>管理界面"]
+        CODEX["Codex = 执行者<br/>4 个并行任务"]
+    end
+    subgraph CLOUD["云端（只由管家出面调用）"]
+        ASR["ASR 语音识别"]
+        LUNA["luna 写总结稿"]
+        TTS["TTS 语音合成"]
+    end
+    KB <-->|"同一 Wi-Fi，加密 UDP"| HOST
+    APP --- HOST
+    HOST <--> CODEX
+    HOST --> ASR
+    HOST --> LUNA
+    HOST --> TTS
