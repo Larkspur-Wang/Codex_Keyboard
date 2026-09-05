@@ -1,5 +1,5 @@
 flowchart TD
-    subgraph W["四个窗口并行，互不阻塞"]
+    subgraph W["示例：四个槽绑定四个不同任务"]
         direction LR
         subgraph S1["槽 1"]
             Q1["指令C ← 指令B ← 指令A（执行中）"]
@@ -16,3 +16,4 @@ flowchart TD
     end
     L5["第 5 颗灯 = 正在运行的任务数<br/>此刻 3 个 → 紫色（0/1/2/3/4 = 绿/黄/橙/紫/红）"]
     W -.-> L5
+    N["同一任务严格 FIFO；重复绑定同一任务不增加并发数"] -.-> W

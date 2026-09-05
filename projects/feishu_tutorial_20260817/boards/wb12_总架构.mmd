@@ -1,18 +1,20 @@
 flowchart LR
-    KB["键盘 = 身体<br/>8 键 / 5 灯 / 麦克风 / 扬声器 / 旋钮<br/>不存任务，不懂 AI"]
+    KB["键盘<br/>输入、录音、灯光和播放<br/>只认槽位，不保存任务对话"]
     subgraph MAC["Mac"]
-        HOST["Host = 管家<br/>状态唯一所有者"]
+        HOST["Host<br/>绑定、队列和缓存管理"]
         APP["桌面 App<br/>管理界面"]
-        CODEX["Codex = 执行者<br/>4 个并行任务"]
+        CODEX["Codex CLI<br/>最多四个不同任务并行"]
     end
-    subgraph CLOUD["云端（只由管家出面调用）"]
+    subgraph CLOUD["互联网服务"]
         ASR["ASR 语音识别"]
         LUNA["luna 写总结稿"]
         TTS["TTS 语音合成"]
+        CM["Codex 任务模型"]
     end
-    KB <-->|"同一 Wi-Fi，加密 UDP"| HOST
+    KB <-->|"局域网 UDP；上行认证，下行加密"| HOST
     APP --- HOST
     HOST <--> CODEX
     HOST --> ASR
     HOST --> LUNA
     HOST --> TTS
+    CODEX --> CM

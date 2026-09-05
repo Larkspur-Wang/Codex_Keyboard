@@ -1,7 +1,9 @@
-flowchart LR
-    subgraph UP["上行：你说话（16 kHz 单声道 PCM16）"]
-        V["声波"] --> MIC["麦克风"] --> I2S["I2S 数字接口"] --> S16["每秒采样 16000 次<br/>每次记 16 位"] --> UDP1["加密 UDP 分帧<br/>边说边发给 Host"]
-    end
-    subgraph DOWN["下行：总结播报"]
-        TTS["云端 TTS 合成<br/>48 kHz 高音质"] --> ENC["Host 转码 IMA-ADPCM<br/>体积约为原始 1/4"] --> UDP2["加密下发"] --> SPK["键盘解压<br/>扬声器播出"]
-    end
+flowchart TD
+    A["录音与播报"] --> MIC["上行：数字麦克风"]
+    MIC --> I2S["I2S 数字接口"]
+    I2S --> PCM["16 kHz 单声道 PCM16"]
+    PCM --> UP["HMAC 认证后传给 Mac<br/>不额外加密 PCM 内容"]
+    A --> TTS["下行：TTS 生成 48 kHz 音频"]
+    TTS --> ENC["Host 编码为 IMA-ADPCM<br/>约为原始 PCM 体积的 1/4"]
+    ENC --> DOWN["AES-GCM 加密下发"]
+    DOWN --> SPK["键盘解码，扬声器播放"]

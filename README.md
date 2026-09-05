@@ -40,9 +40,13 @@ PWA、Cloudflare Relay、公网端口或远程桥。
 
 ## 训练营材料
 
-- 学员手册：`docs/训练营学员手册.md`
-- PowerPoint：`projects/codex-radio_ppt169_20260810/exports/Codex任务电台_课程案例_Lark.pptx`
-- PDF：`projects/codex-radio_ppt169_20260810/exports/Codex任务电台_课程案例_Lark.pdf`
+- [学员手册](docs/训练营学员手册.md)
+- [飞书手把手教程](https://rx5emoyb8vg.feishu.cn/docx/R7uTdHTbMotf0px4sy6cPu7nn0f)
+- [PowerPoint：47 页，含讲稿，2026-09-05 修订](projects/codex-radio_ppt169_20260810/exports/Codex任务电台_课程案例_Lark_47页_20260905.pptx)
+- [PDF：同版 47 页，Keynote 导出](projects/codex-radio_ppt169_20260810/exports/Codex任务电台_课程案例_Lark_47页_20260905.pdf)
+- [本地教程底稿与图表源码](projects/feishu_tutorial_20260817/draft.md)
 
-课程案例名为《Codex 任务电台：一把键盘，远程开发》。课件共 36 页，包含产品动机、真实键盘与
-App、端到端链路、关键实现、踩坑过程、现场演示流程和技术附录。
+课程案例名为《Codex 任务电台：一把键盘，远程开发》。课件共 47 页：41 页主讲与 6 页附录，
+包含动机、真实键盘与 App、十个基础概念、开发中的问题和复现练习。
+代码仍锁定 `v0.1.0-local-training`；本轮只修订材料，没有重新烧录或运行真机验收。
+旧版导出保留在同目录，版本区别见[课件索引](projects/codex-radio_ppt169_20260810/README.md)。

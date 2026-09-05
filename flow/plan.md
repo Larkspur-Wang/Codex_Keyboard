@@ -1,5 +1,11 @@
 # Codex Keyboard 本地 Wi-Fi 计划
 
+## 2026-09 课程材料复核
+
+- [x] 建立线程 goal，核对当前 47 页源稿与旧 36 页导出，读取本地教程底稿。
+- [x] 按 `flow/tasks/2026-09-course-materials-review.md` 完成飞书、本地文档和全部页面检查；窄屏画板与本机依赖审计限制单独记录。
+- [x] 用户确认范围后统一事实、自然中文和视觉呈现，重新导出并回读验证；材料随本阶段记录提交推送，远端结果见收工回复。
+
 ## L0 仓库抽取与边界冻结
 
 - [x] 从 `easy-codex-input@52949d3` 建立独立工作目录和公开 GitHub 仓库。
@@ -45,7 +51,8 @@
 ### L2B 长稳与流式播放
 
 - [ ] 桌面 App 完成四槽绑定、队列、未读、设备和网络诊断 UI。
-- [ ] 固件先在已认证的顺序 EIAD 传输上加入 24 KiB 预缓冲后边收边播，把按播放键到首声从整段传输时间中解耦；随后再把完整 PSRAM backing 收敛为有界 jitter/ring。
+- [x] 已实现顺序 EIAD 传输的 24 KiB 预缓冲与边收边播；2026-09 材料复核按 `codex_lan_playback.cpp` 更正此处遗留状态，不代表新增真机验收。
+- [ ] 将完整 PSRAM backing 收敛为有界 jitter/ring，并独立验证慢网与抢占行为。
 - [ ] 流式播放必须覆盖慢网、断包重传、播放抢占、Host 中断和传输未完成时 speaker 失败，只有完整播放后才允许 heard/cache deletion。
 - [ ] EIP request replay floor 做有界生命周期治理和重启策略。
 - [ ] S1-S8 各 20 轮 HIL，覆盖断网、Host 重启、键盘重启和旧 generation。

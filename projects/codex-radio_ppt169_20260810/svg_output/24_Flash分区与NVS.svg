@@ -1,1 +1,48 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720"><g id="background"><rect width="1280" height="720" fill="#F3F5F3"/></g><g id="badge"><rect x="1076" y="52" width="140" height="34" rx="17" fill="#1E9668"/><text x="1146" y="75" text-anchor="middle" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="15" font-weight="bold" fill="#F3F5F3">概念卡 3 / 10</text></g><g id="header"><text x="64" y="82" font-family="Arial Black, Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="38" font-weight="bold" fill="#19211F">Flash 分区与 NVS：刷了固件，配置还在</text><text x="64" y="122" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="22" fill="#5D6864">键盘的 16 MB 存储划成几个抽屉，刷固件只换其中三个。</text></g><g id="metaphor"><rect x="64" y="160" width="560" height="400" rx="12" fill="#FFFFFF" stroke="#CBD2CE" stroke-width="2"/><text x="92" y="208" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="20" font-weight="bold" fill="#2D7D9A">比喻</text><use data-icon="phosphor-duotone/hard-drives" x="528" y="184" width="56" height="56" fill="#2D7D9A"/><text x="92" y="264" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="18" fill="#19211F">搬家只换家具（程序），</text><text x="92" y="298" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="18" fill="#19211F">不动保险柜（配置），</text><text x="92" y="332" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="18" fill="#19211F">也不动相册（开机音、提示音）。</text></g><g id="project"><rect x="656" y="160" width="560" height="400" rx="12" fill="#FFFFFF" stroke="#CBD2CE" stroke-width="2"/><text x="684" y="208" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="20" font-weight="bold" fill="#1E9668">在本项目里</text><use data-icon="phosphor-duotone/database" x="1120" y="184" width="56" height="56" fill="#1E9668"/><text x="684" y="264" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="17" fill="#19211F">Flash 从地址 0 开始依次是：</text><text x="684" y="298" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="17" fill="#19211F">bootloader 引导、分区表（抽屉目录）、</text><text x="684" y="332" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="17" fill="#19211F">应用程序，后面是 NVS 和音效数据区。</text><text x="684" y="366" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="17" fill="#19211F">NVS 存 Wi-Fi 凭据、Mac 地址、</text><text x="684" y="400" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="17" fill="#19211F">device secret 和扬声器音量档位——</text><text x="684" y="434" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="17" fill="#19211F">音量断电不丢，重刷固件不用重新配网。</text><text x="684" y="468" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="17" fill="#19211F">烧录只写 0x0、0x8000、0x10000</text><text x="684" y="502" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="17" fill="#19211F">三个地址，就是只换那三个抽屉。</text></g><g id="pitfall"><rect x="64" y="584" width="1152" height="60" rx="8" fill="#FFFFFF" stroke="#D65C4A" stroke-width="2"/><use data-icon="phosphor-duotone/warning-circle" x="88" y="600" width="28" height="28" fill="#D65C4A"/><text x="132" y="622" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="17" font-weight="bold" fill="#D65C4A">erase_flash 整片擦除会连 NVS 和音效一起清空——教程烧录命令没有这一步，别自己加。</text></g><g id="footer"><text x="64" y="690" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" font-size="12" fill="#5D6864">24 / 47</text></g></svg>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <rect width="1280" height="720" fill="#F3F5F3"/>
+  <g id="content" font-family="Arial, Arial Unicode MS, Microsoft YaHei, sans-serif" fill="#19211F">
+    <text x="64" y="54" font-size="15" fill="#1E9668">原理 3 / 10 · Flash 与 NVS</text>
+    <text x="64" y="108" font-size="38" font-weight="bold">刷哪一段，保留哪一段</text>
+    <text x="64" y="151" font-size="22" fill="#5D6864">以本版 partitions.csv 为准。NVS 在应用之前，不在应用后面。</text>
+    <text x="80" y="217" font-size="20" fill="#5D6864">起始地址</text>
+    <text x="300" y="217" font-size="20" fill="#5D6864">内容</text>
+    <text x="668" y="217" font-size="20" fill="#5D6864">本次三段烧录</text>
+    <path d="M64 235 H810 M64 287 H810 M64 339 H810 M64 391 H810 M64 443 H810 M64 495 H810 M64 547 H810 M64 599 H810" stroke="#CBD2CE"/>
+    <g id="content" font-family="Consolas, Courier New, monospace" font-size="22">
+      <text x="80" y="269">0x0000</text>
+      <text x="80" y="321">0x8000</text>
+      <text x="80" y="373">0x9000</text>
+      <text x="80" y="425">0xF000</text>
+      <text x="80" y="477">0x10000</text>
+      <text x="80" y="529">0x310000</text>
+      <text x="80" y="581">0x3A0000</text>
+    </g>
+    <g font-size="22">
+      <text x="300" y="269">bootloader 引导</text>
+      <text x="300" y="321">分区表</text>
+      <text x="300" y="373">NVS 配置</text>
+      <text x="300" y="425">PHY 数据</text>
+      <text x="300" y="477">应用程序（3 MB）</text>
+      <text x="300" y="529">sound_a 音效区</text>
+      <text x="300" y="581">sound_b 音效区</text>
+      <text x="693" y="269" fill="#2D7D9A">写入</text>
+      <text x="693" y="321" fill="#2D7D9A">写入</text>
+      <text x="693" y="373" fill="#1E9668">保留</text>
+      <text x="693" y="425" fill="#1E9668">保留</text>
+      <text x="693" y="477" fill="#2D7D9A">写入</text>
+      <text x="693" y="529" fill="#1E9668">保留</text>
+      <text x="693" y="581" fill="#1E9668">保留</text>
+    </g>
+    <path d="M850 202 V598" stroke="#CBD2CE" stroke-width="2"/>
+    <use data-icon="phosphor-duotone/hard-drives" x="906" y="210" width="64" height="64" fill="#1E9668"/>
+    <text x="901" y="321" font-size="24" font-weight="bold">NVS 里保存什么</text>
+    <text x="901" y="362" font-size="22">Wi-Fi、Mac 端点、</text>
+    <text x="901" y="396" font-size="22">设备密钥、音量档位。</text>
+    <text x="901" y="474" font-size="24" font-weight="bold">音量播报在哪里</text>
+    <text x="901" y="515" font-size="22">十条提示音嵌入应用，</text>
+    <text x="901" y="549" font-size="22">不在独立音效区。</text>
+    <text x="64" y="647" font-size="20" fill="#D65C4A">不执行整片擦除。更换分区布局时，必须重新评估配置和音效的保留方式。</text>
+    <text x="64" y="690" font-size="12" fill="#5D6864">24 / 47 · 按地址顺序示意，非容量比例图</text>
+  </g>
+</svg>
