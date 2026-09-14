@@ -87,6 +87,12 @@
   逐项原样保留或新旧文本增量；只保留结构、任务归属、尺寸、脱敏和有效 TTS 等运行安全底线，并让
   当前仍 pending 的第 3 槽完成结果自动重新总结并发布为 generation 22；等待真机确认 S7 灯已同步点亮。
 
+## 2026-09-14 总结隔离与 Luna low
+
+- [x] 总结隔离调用保持 Spark 临时 `CODEX_HOME`，模型仍为 `gpt-5.6-luna`，reasoning effort 改为 `low`。
+- [x] 诊断并收口 `Spark temporary workspace is unsafe`：可信根仍是 App Support `run/spark`，不改用 `~/.codex` 或 `/tmp`；允许 Codex CLI 0.154 在隔离 home 写入的 `queue_1.sqlite` 家族，空表才通过，未知文件继续 fail closed。
+- [x] Host 自动化后 `launch-agent-upgrade`；不烧录固件。升级后 Host 已把槽 1 积压 completion 发布为未听总结；用户已按 S5 听到播报。
+
 ## 阶段合同
 
 每阶段必须依次完成：实现 -> 自动化 -> live/HIL（如适用）-> 提交 -> 推送。当前按用户要求不启动子智能体或额外独立审查。

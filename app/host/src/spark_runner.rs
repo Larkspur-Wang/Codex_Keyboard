@@ -35,7 +35,7 @@ use crate::store::{MAX_SUMMARY_COMPLETIONS_PER_CLAIM, PendingSummaryCompletion, 
 use crate::summary::{MAX_SUMMARY_DOCUMENT_BYTES, SummaryDocument};
 
 pub const SPARK_MODEL: &str = "gpt-5.6-luna";
-pub const SPARK_REASONING_EFFORT: &str = "high";
+pub const SPARK_REASONING_EFFORT: &str = "low";
 const DISABLED_SPARK_FEATURES: &[&str] = &[
     "plugins",
     "remote_plugin",
@@ -73,7 +73,7 @@ const MAX_TURN_PACK_TOTAL_BYTES: usize = 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHILD_FILE_BYTES: libc::rlim_t = 16 * 1024 * 1024;
 pub const SPARK_MAX_WORKSPACE_BYTES: u64 = 8 * 1024 * 1024;
-pub const SPARK_MAX_WORKSPACE_NODES: usize = 32;
+pub const SPARK_MAX_WORKSPACE_NODES: usize = 48;
 const MAX_RUNTIME_DATABASE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RUNTIME_WAL_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RUNTIME_SHM_BYTES: u64 = 256 * 1024;
@@ -1660,16 +1660,20 @@ fn runtime_file_limit(name: &str) -> Option<u64> {
     match name {
         "installation_id" => Some(128),
         "models_cache.json" => Some(MAX_MODEL_CACHE_BYTES),
-        "goals_1.sqlite" | "memories_1.sqlite" | "logs_2.sqlite" | "state_5.sqlite" => {
-            Some(MAX_RUNTIME_DATABASE_BYTES)
-        }
+        "goals_1.sqlite"
+        | "memories_1.sqlite"
+        | "logs_2.sqlite"
+        | "queue_1.sqlite"
+        | "state_5.sqlite" => Some(MAX_RUNTIME_DATABASE_BYTES),
         "goals_1.sqlite-wal"
         | "memories_1.sqlite-wal"
         | "logs_2.sqlite-wal"
+        | "queue_1.sqlite-wal"
         | "state_5.sqlite-wal" => Some(MAX_RUNTIME_WAL_BYTES),
         "goals_1.sqlite-shm"
         | "memories_1.sqlite-shm"
         | "logs_2.sqlite-shm"
+        | "queue_1.sqlite-shm"
         | "state_5.sqlite-shm" => Some(MAX_RUNTIME_SHM_BYTES),
         _ => None,
     }
@@ -1683,6 +1687,7 @@ fn validate_runtime_databases(codex_home: &Path) -> Result<(), SparkError> {
         ),
         ("memories_1.sqlite", &["jobs", "stage1_outputs"]),
         ("logs_2.sqlite", &["logs"]),
+        ("queue_1.sqlite", &["queued_items", "queued_thread_revisions"]),
         (
             "state_5.sqlite",
             &[
@@ -1760,6 +1765,7 @@ fn spark_command(
     output: &Path,
     tmpdir: &Path,
 ) -> Command {
+    let reasoning_effort = format!("model_reasoning_effort=\"{SPARK_REASONING_EFFORT}\"");
     let mut command = Command::new(executable);
     command.args([
         "exec",
@@ -1774,7 +1780,7 @@ fn spark_command(
         "--config",
         "approval_policy=\"never\"",
         "--config",
-        "model_reasoning_effort=\"high\"",
+        reasoning_effort.as_str(),
         "--output-schema",
     ]);
     command.arg(schema);
@@ -2568,6 +2574,7 @@ printf '%s' '{{"schema":1,"facts":["done"],"pending":[],"decisions":[],"spoken_t
         assert!(prompt.contains("old fact"));
         assert!(!prompt.contains("summary-request"));
         let arguments = fs::read_to_string(args).unwrap();
+        let reasoning_effort = format!("model_reasoning_effort=\"{SPARK_REASONING_EFFORT}\"");
         for required in [
             "exec",
             "--model",
@@ -2578,7 +2585,7 @@ printf '%s' '{{"schema":1,"facts":["done"],"pending":[],"decisions":[],"spoken_t
             "--ignore-user-config",
             "--ignore-rules",
             "approval_policy=\"never\"",
-            "model_reasoning_effort=\"high\"",
+            reasoning_effort.as_str(),
             "--output-schema",
             "--output-last-message",
             "-",
@@ -2667,6 +2674,10 @@ printf '%s' '{{"schema":1,"facts":["done"],"pending":[],"decisions":[],"spoken_t
                 "CREATE TABLE logs(value TEXT); INSERT INTO logs VALUES ('x');",
             ),
             (
+                "queue_1.sqlite",
+                "CREATE TABLE queued_items(value TEXT); INSERT INTO queued_items VALUES ('x'); CREATE TABLE queued_thread_revisions(value TEXT);",
+            ),
+            (
                 "state_5.sqlite",
                 "CREATE TABLE external_agent_config_imports(value TEXT); CREATE TABLE remote_control_enrollments(value TEXT); CREATE TABLE thread_dynamic_tools(value TEXT); CREATE TABLE thread_spawn_edges(value TEXT); CREATE TABLE threads(value TEXT); INSERT INTO threads VALUES ('x');",
             ),
@@ -2682,6 +2693,37 @@ printf '%s' '{{"schema":1,"facts":["done"],"pending":[],"decisions":[],"spoken_t
             );
             fs::remove_file(path).unwrap();
         }
+
+        let empty_queue = root.path().join("queue_1.sqlite");
+        let connection = rusqlite::Connection::open(&empty_queue).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE queued_items(value TEXT); CREATE TABLE queued_thread_revisions(value TEXT);",
+            )
+            .unwrap();
+        drop(connection);
+        validate_runtime_databases(root.path()).unwrap();
+    }
+
+    #[test]
+    fn isolated_home_accepts_empty_codex_queue_database() {
+        let root = tempdir().unwrap();
+        let queue = root.path().join("empty-queue.sqlite");
+        let connection = rusqlite::Connection::open(&queue).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE queued_items(value TEXT); CREATE TABLE queued_thread_revisions(value TEXT);",
+            )
+            .unwrap();
+        drop(connection);
+        fs::set_permissions(&queue, fs::Permissions::from_mode(0o644)).unwrap();
+        let executable = success_script(
+            root.path(),
+            &format!("cp '{}' \"$CODEX_HOME/queue_1.sqlite\"", queue.display()),
+        );
+        SparkRunner::new(config(root.path(), executable))
+            .run(&claim(), None)
+            .unwrap();
     }
 
     #[test]
