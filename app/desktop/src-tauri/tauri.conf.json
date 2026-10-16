@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Codex Keyboard",
+  "productName": "DeepSeekHarness KeyBroad",
   "version": "0.1.0",
   "identifier": "com.larkspur.codex-keyboard",
   "build": {
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Codex Keyboard",
+        "title": "DeepSeekHarness KeyBroad",
         "width": 760,
         "height": 800,
         "minWidth": 660,

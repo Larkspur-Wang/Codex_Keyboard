@@ -13,14 +13,25 @@ await access(new URL("WebView2Loader.dll", release));
 try {
   await copyFile(
     new URL("easy-codex-desktop.exe", release),
+    new URL("DeepSeekHarness KeyBroad.exe", release),
+  );
+  await copyFile(
+    new URL("easy-codex-desktop.exe", release),
     new URL("Codex Keyboard.exe", release),
   );
 } catch (cause) {
-  throw new Error("Close Codex Keyboard before replacing the desktop exe", {
-    cause,
-  });
+  throw new Error(
+    "Close DeepSeekHarness KeyBroad before replacing the desktop exe",
+    {
+      cause,
+    },
+  );
 }
-for (const name of ["easy-codex-desktop.exe", "Codex Keyboard.exe"]) {
+for (const name of [
+  "easy-codex-desktop.exe",
+  "DeepSeekHarness KeyBroad.exe",
+  "Codex Keyboard.exe",
+]) {
   const label = spawnSync(
     "icacls.exe",
     [fileURLToPath(new URL(name, release)), "/setintegritylevel", "M"],
@@ -32,5 +43,5 @@ for (const name of ["easy-codex-desktop.exe", "Codex Keyboard.exe"]) {
     );
 }
 console.log(
-  `Windows desktop ready: ${fileURLToPath(new URL("Codex Keyboard.exe", release))}`,
+  `Windows desktop ready: ${fileURLToPath(new URL("DeepSeekHarness KeyBroad.exe", release))}`,
 );

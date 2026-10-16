@@ -1,7 +1,10 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $hostExe = Join-Path $repo 'target\release\easy-codex-host.exe'
-$desktopExe = Join-Path $repo 'target\release\Codex Keyboard.exe'
+$desktopExe = Join-Path $repo 'target\release\DeepSeekHarness KeyBroad.exe'
+if (!(Test-Path -LiteralPath $desktopExe)) {
+    $desktopExe = Join-Path $repo 'target\release\Codex Keyboard.exe'
+}
 
 function Invoke-HostControl([string]$Command) {
     $info = New-Object System.Diagnostics.ProcessStartInfo

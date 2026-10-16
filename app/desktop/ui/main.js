@@ -127,8 +127,10 @@ function renderDashboard(snapshot) {
       label.textContent = `槽位 ${slot.slot}`;
       select.id = selectId;
       select.ariaLabel = `槽位 ${slot.slot} 任务`;
-      button.ariaLabel = `绑定槽位 ${slot.slot}`;
-      select.addEventListener("change", () => dirtySlots.add(slot.slot));
+      select.addEventListener("change", () => {
+        dirtySlots.add(slot.slot);
+        void bindSlot(slot.slot, newRow);
+      });
       button.addEventListener("click", () => void bindSlot(slot.slot, newRow));
       elements.slots.append(newRow);
     }
@@ -239,4 +241,4 @@ async function refresh() {
 
 elements.refresh.addEventListener("click", refresh);
 void refresh();
-window.setInterval(refresh, 3000);
+window.setInterval(refresh, 1000);
