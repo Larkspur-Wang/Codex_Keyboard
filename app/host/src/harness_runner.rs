@@ -11,10 +11,25 @@ use crate::store::JobFailureKind;
 pub(crate) fn run(
     launcher: &Path,
     cwd: &Path,
+    task_id: &str,
     prompt: &str,
     cancel: &AtomicBool,
     timeout: Duration,
 ) -> Result<String, JobFailureKind> {
+    let session_arg = format!("session-{task_id}");
+    let dsh_home = std::env::var_os("DSH_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(|h| std::path::PathBuf::from(h).join(".dsh"))
+        });
+    let has_session = dsh_home.as_ref().map_or(false, |home| {
+        home.join("storages/session_projcache/sessions")
+            .join(format!("{session_arg}.json"))
+            .is_file()
+    });
+
     #[cfg(windows)]
     let mut command = {
         let root = launcher
@@ -37,9 +52,11 @@ pub(crate) fn run(
     };
     #[cfg(not(windows))]
     let mut command = Command::new(launcher);
-    command
-        .args(["--profile", "headless", "--json", "-"])
-        .current_dir(cwd);
+    command.args(["--profile", "headless"]);
+    if has_session {
+        command.args(["--session-id", &session_arg]);
+    }
+    command.args(["--json", "-"]).current_dir(cwd);
     drive(command, prompt, cancel, timeout)
 }
 
@@ -233,17 +250,17 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn powershell(body: &str) -> Command {
-        let mut command = Command::new("powershell.exe");
-        command.args(["-NoProfile", "-NonInteractive", "-Command", body]);
+    fn mock_subprocess(body: &str) -> Command {
+        let mut command = Command::new("python");
+        command.args(["-c", body]);
         command
     }
 
     #[cfg(windows)]
     #[test]
     fn stdin_eof_and_concurrent_stderr_drain_are_required() {
-        let command = powershell(
-            "$p=[Console]::In.ReadToEnd(); [Console]::Error.Write(('x'*100000)); if ($p -ne 'hello & %PATH%') { exit 2 }; [Console]::Out.WriteLine('{\"type\":\"final\",\"text\":\"answer\"}')",
+        let command = mock_subprocess(
+            "import sys; p = sys.stdin.read(); sys.stderr.write('x'*100000); sys.stderr.flush(); sys.exit(2) if p != 'hello & %PATH%' else print('{\"type\":\"final\",\"text\":\"answer\"}')",
         );
         assert_eq!(
             drive(
@@ -260,8 +277,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn nonzero_exit_and_timeout_never_complete() {
-        let command = powershell(
-            "[Console]::Out.WriteLine('{\"type\":\"final\",\"text\":\"answer\"}'); exit 2",
+        let command = mock_subprocess(
+            "import sys; print('{\"type\":\"final\",\"text\":\"answer\"}'); sys.exit(2)",
         );
         assert_eq!(
             drive(
@@ -274,7 +291,7 @@ mod tests {
         );
         assert_eq!(
             drive(
-                powershell("Start-Sleep 20"),
+                mock_subprocess("import time; time.sleep(20)"),
                 &"blocked input".repeat(10000),
                 &AtomicBool::new(false),
                 Duration::from_millis(200)
@@ -283,7 +300,7 @@ mod tests {
         );
         assert_eq!(
             drive(
-                powershell("Start-Sleep 20"),
+                mock_subprocess("import time; time.sleep(20)"),
                 "",
                 &AtomicBool::new(true),
                 Duration::from_secs(10)

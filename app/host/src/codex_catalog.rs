@@ -96,13 +96,23 @@ pub struct CodexTask {
 pub struct CodexTaskCatalog {
     codex_home: PathBuf,
     snapshot_root: PathBuf,
+    dsh_home: PathBuf,
 }
 
 impl CodexTaskCatalog {
     pub fn from_paths(codex_home: PathBuf, snapshot_root: PathBuf) -> Self {
+        let home = codex_home
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| codex_home.clone());
+        let dsh_home = match std::env::var_os("DSH_HOME") {
+            Some(value) => PathBuf::from(value),
+            None => home.join(".dsh"),
+        };
         Self {
             codex_home,
             snapshot_root,
+            dsh_home,
         }
     }
 
@@ -116,10 +126,18 @@ impl CodexTaskCatalog {
             Some(value) => PathBuf::from(value),
             None => home.join(".codex"),
         };
+        let dsh_home = match std::env::var_os("DSH_HOME") {
+            Some(value) => PathBuf::from(value),
+            None => home.join(".dsh"),
+        };
         let snapshot_root = crate::paths::AppPaths::from_home(&home)
             .runtime_directory
             .join("catalog-snapshots");
-        Ok(Self::from_paths(codex_home, snapshot_root))
+        Ok(Self {
+            codex_home,
+            snapshot_root,
+            dsh_home,
+        })
     }
 
     pub fn list_tasks(&self) -> Result<Vec<CodexTask>, CatalogError> {
@@ -127,6 +145,14 @@ impl CodexTaskCatalog {
     }
 
     fn list_tasks_once(&self) -> Result<Vec<CodexTask>, CatalogError> {
+        let dsh_tasks = read_dsh_tasks(&self.dsh_home);
+        if !dsh_tasks.is_empty() {
+            return Ok(dsh_tasks);
+        }
+        self.list_codex_tasks()
+    }
+
+    fn list_codex_tasks(&self) -> Result<Vec<CodexTask>, CatalogError> {
         let global = read_global_state(&self.codex_home.join(".codex-global-state.json"))?;
         let index = read_session_index(&self.codex_home.join("session_index.jsonl"))?;
         let pinned_ids = pinned_ids(&global)?;
@@ -176,10 +202,20 @@ impl CodexTaskCatalog {
         if Uuid::parse_str(task_id).is_err() {
             return Err(CatalogError::NotAllowlisted);
         }
-        self.list_tasks()?
-            .into_iter()
-            .find(|task| task.task_id == task_id)
-            .ok_or(CatalogError::NotAllowlisted)
+        if let Ok(tasks) = self.list_tasks() {
+            if let Some(task) = tasks.into_iter().find(|task| task.task_id == task_id) {
+                return Ok(task);
+            }
+        }
+        if let Some(task) = read_single_dsh_task(&self.dsh_home, task_id) {
+            return Ok(task);
+        }
+        if let Ok(codex_tasks) = self.list_codex_tasks() {
+            if let Some(task) = codex_tasks.into_iter().find(|task| task.task_id == task_id) {
+                return Ok(task);
+            }
+        }
+        Err(CatalogError::NotAllowlisted)
     }
 }
 
@@ -558,6 +594,204 @@ fn build_task(
         updated_at_ms: database.updated_at_ms,
         pinned,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct DshSessionFile {
+    record: Option<DshRecordData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DshRecordData {
+    identity: Option<DshIdentityData>,
+    rows: Option<DshRowsData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DshIdentityData {
+    cwd: Option<String>,
+    #[serde(rename = "createdAt")]
+    created_at: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DshRowsData {
+    title: Option<DshValString>,
+    #[serde(rename = "titleInput")]
+    title_input: Option<DshTitleInputData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DshValString {
+    val: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DshTitleInputData {
+    val: Option<DshTitleInputValData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DshTitleInputValData {
+    first: Option<DshTitleInputFirstData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DshTitleInputFirstData {
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DshWorkspaceData {
+    global: Option<DshWorkspaceGlobalData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DshWorkspaceGlobalData {
+    #[serde(rename = "pinnedSessionIds")]
+    pinned_session_ids: Option<Vec<String>>,
+}
+
+fn read_dsh_pinned_ids(dsh_home: &Path) -> BTreeSet<String> {
+    let mut pinned = BTreeSet::new();
+    let workspace_file = dsh_home.join("storages/workspace.json");
+    if let Ok(bytes) = fs::read(&workspace_file) {
+        if let Ok(data) = serde_json::from_slice::<DshWorkspaceData>(&bytes) {
+            if let Some(ids) = data.global.and_then(|g| g.pinned_session_ids) {
+                for id in ids {
+                    let raw_id = id.strip_prefix("session-").unwrap_or(&id);
+                    if Uuid::parse_str(raw_id).is_ok() {
+                        pinned.insert(raw_id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    pinned
+}
+
+fn parse_dsh_session(path: &Path, task_id: &str, is_pinned: bool) -> Option<CodexTask> {
+    if Uuid::parse_str(task_id).is_err() {
+        return None;
+    }
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    let doc: DshSessionFile = serde_json::from_slice(&bytes).ok()?;
+    let rec = doc.record?;
+    let ident = rec.identity?;
+    let cwd_str = ident.cwd?;
+    let cwd = PathBuf::from(&cwd_str);
+    let mut name = None;
+    if let Some(rows) = rec.rows {
+        if let Some(val_str) = rows.title.and_then(|t| t.val) {
+            let cleaned = clean_text(&val_str, MAX_TASK_NAME_CHARS);
+            if !cleaned.is_empty()
+                && !cleaned
+                    .chars()
+                    .all(|c| c == '\u{FFFD}' || c.is_whitespace())
+            {
+                name = Some(cleaned);
+            }
+        }
+        if name.is_none() {
+            if let Some(first_text) = rows
+                .title_input
+                .and_then(|ti| ti.val)
+                .and_then(|v| v.first)
+                .and_then(|f| f.text)
+            {
+                let first_line = first_text.lines().next().unwrap_or(&first_text);
+                let cleaned = clean_text(first_line, MAX_TASK_NAME_CHARS);
+                if !cleaned.is_empty()
+                    && !cleaned
+                        .chars()
+                        .all(|c| c == '\u{FFFD}' || c.is_whitespace())
+                {
+                    name = Some(cleaned);
+                }
+            }
+        }
+    }
+    let fallback = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| clean_text(n, MAX_TASK_NAME_CHARS))
+        .unwrap_or_else(|| format!("任务 {}", &task_id[..8.min(task_id.len())]));
+    let name = name.unwrap_or(fallback);
+    let project = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| clean_text(n, MAX_PROJECT_NAME_CHARS))
+        .unwrap_or_default();
+    let updated_at_ms = ident.created_at.unwrap_or(0);
+    let rollout_path = cwd.join("rollout.jsonl");
+
+    Some(CodexTask {
+        task_id: task_id.to_string(),
+        name,
+        project,
+        cwd,
+        rollout_path,
+        updated_at_ms,
+        pinned: is_pinned,
+    })
+}
+
+fn read_single_dsh_task(dsh_home: &Path, task_id: &str) -> Option<CodexTask> {
+    let session_file = dsh_home
+        .join("storages/session_projcache/sessions")
+        .join(format!("session-{task_id}.json"));
+    if !session_file.is_file() {
+        return None;
+    }
+    let pinned_set = read_dsh_pinned_ids(dsh_home);
+    parse_dsh_session(&session_file, task_id, pinned_set.contains(task_id))
+}
+
+fn read_dsh_tasks(dsh_home: &Path) -> Vec<CodexTask> {
+    let sessions_dir = dsh_home.join("storages/session_projcache/sessions");
+    let Ok(entries) = fs::read_dir(&sessions_dir) else {
+        return Vec::new();
+    };
+    let pinned_set = read_dsh_pinned_ids(dsh_home);
+    let mut tasks = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(uuid_str) = file_name
+            .strip_prefix("session-")
+            .and_then(|s| s.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if Uuid::parse_str(uuid_str).is_err() {
+            continue;
+        }
+        let is_pinned = pinned_set.contains(uuid_str);
+        if let Some(task) = parse_dsh_session(&path, uuid_str, is_pinned) {
+            tasks.push(task);
+        }
+    }
+
+    tasks.sort_by(|left, right| {
+        right
+            .pinned
+            .cmp(&left.pinned)
+            .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    tasks.truncate(24);
+    tasks
 }
 
 fn clean_text(value: &str, max_chars: usize) -> String {

@@ -196,6 +196,7 @@ impl CodexRunner {
             return crate::harness_runner::run(
                 &dsh,
                 &job.cwd,
+                &job.task_id,
                 &job.prompt,
                 cancel,
                 self.config.timeout,

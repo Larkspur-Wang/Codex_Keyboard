@@ -224,6 +224,12 @@ fn print_codex_catalog_status() -> Result<(), Box<dyn std::error::Error>> {
     println!("tasks={}", tasks.len());
     println!("pinned={pinned}");
     println!("recent={}", tasks.len() - pinned);
+    for task in &tasks {
+        println!(
+            "task={} name={:?} project={:?}",
+            task.task_id, task.name, task.project
+        );
+    }
     Ok(())
 }
 

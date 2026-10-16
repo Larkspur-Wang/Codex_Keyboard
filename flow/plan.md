@@ -44,7 +44,7 @@
 
 ### L2B 长稳与流式播放
 
-- [ ] 桌面 App 完成四槽绑定、队列、未读、设备和网络诊断 UI。
+- [/] 桌面 App 完成四槽绑定、队列、未读、设备和网络诊断 UI（适配 DeepSeek Harness 任务同步与可视化）。
 - [ ] 固件先在已认证的顺序 EIAD 传输上加入 24 KiB 预缓冲后边收边播，把按播放键到首声从整段传输时间中解耦；随后再把完整 PSRAM backing 收敛为有界 jitter/ring。
 - [ ] 流式播放必须覆盖慢网、断包重传、播放抢占、Host 中断和传输未完成时 speaker 失败，只有完整播放后才允许 heard/cache deletion。
 - [ ] EIP request replay floor 做有界生命周期治理和重启策略。

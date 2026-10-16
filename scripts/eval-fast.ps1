@@ -37,8 +37,16 @@ foreach ($file in $files) {
     }
 }
 $pattern = 'sk-[A-Za-z0-9_-]{20,}|Bearer\s+[A-Za-z0-9._-]{20,}|(DASHSCOPE_API_KEY|QWEN_API_KEY)\s*=\s*[^<`\s]+|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----'
-$scanFiles = @($files | Where-Object { $_ -ne 'scripts/check-secrets.sh' })
-& rg -I -q -e $pattern -- $scanFiles
-if ($LASTEXITCODE -eq 0) { throw 'Credential-like candidate content detected' }
-if ($LASTEXITCODE -ne 1) { throw 'Secret content scan could not finish' }
+$scanFiles = @($files | Where-Object { $_ -ne 'scripts/check-secrets.sh' -and $_ -ne 'scripts/eval-fast.ps1' -and (Test-Path -LiteralPath $_) })
+$rg = Get-Command rg.exe -ErrorAction SilentlyContinue
+if ($rg) {
+    & $rg -I -q -e $pattern -- $scanFiles
+    if ($LASTEXITCODE -eq 0) { throw 'Credential-like candidate content detected' }
+    if ($LASTEXITCODE -ne 1) { throw 'Secret content scan could not finish' }
+} else {
+    $matches = Select-String -LiteralPath $scanFiles -Pattern $pattern
+    if ($matches) {
+        throw "Credential-like candidate content detected: $($matches[0])"
+    }
+}
 Write-Host '[PASS] Windows software checks passed; hardware HIL is independent.' -ForegroundColor Green

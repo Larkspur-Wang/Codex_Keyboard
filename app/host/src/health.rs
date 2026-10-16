@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -707,6 +707,39 @@ fn reserve_client(active: &AtomicUsize) -> bool {
         .is_ok()
 }
 
+fn sync_slot_bindings(
+    store: &mut StateStore,
+    catalog: &CodexTaskCatalog,
+) -> Result<(), HealthError> {
+    let tasks = catalog.list_tasks()?;
+    if tasks.is_empty() {
+        return Ok(());
+    }
+    let bindings = store.bindings()?;
+    let binding_map = bindings
+        .into_iter()
+        .map(|b| (b.slot, b))
+        .collect::<BTreeMap<_, _>>();
+    let valid_task_ids = tasks
+        .iter()
+        .map(|t| t.task_id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    for slot in 1..=4 {
+        let needs_binding = match binding_map.get(&slot) {
+            None => true,
+            Some(binding) => !valid_task_ids.contains(binding.task_id.as_str()),
+        };
+        if needs_binding {
+            let target_task = &tasks[(slot as usize - 1) % tasks.len()];
+            let expected_gen = binding_map.get(&slot).map(|b| b.generation);
+            let _ =
+                BindingService::new(catalog).bind(store, slot, expected_gen, &target_task.task_id);
+        }
+    }
+    Ok(())
+}
+
 fn process_control_request(
     request: ControlRequest,
     store: &mut StateStore,
@@ -716,6 +749,7 @@ fn process_control_request(
 ) {
     match request {
         ControlRequest::Dashboard { reply } => {
+            let _ = sync_slot_bindings(store, catalog);
             let _ = reply.send(build_dashboard(store, catalog, paths, lan_voice.status()));
         }
         ControlRequest::BindSlot {

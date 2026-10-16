@@ -126,7 +126,7 @@ function renderDashboard(snapshot) {
       label.htmlFor = selectId;
       label.textContent = `槽位 ${slot.slot}`;
       select.id = selectId;
-      select.ariaLabel = `槽位 ${slot.slot} Codex 任务`;
+      select.ariaLabel = `槽位 ${slot.slot} 任务`;
       button.ariaLabel = `绑定槽位 ${slot.slot}`;
       select.addEventListener("change", () => dirtySlots.add(slot.slot));
       button.addEventListener("click", () => void bindSlot(slot.slot, newRow));
@@ -140,7 +140,7 @@ function renderDashboard(snapshot) {
       : (slot.task_id ?? "");
     const optionSignature = tasks.map((task) => task.task_id).join("|");
     if (select.dataset.options !== optionSignature) {
-      select.replaceChildren(new Option("选择 Codex 任务", "", true, false));
+      select.replaceChildren(new Option("选择任务", "", true, false));
       const placeholder = select.options.item(0);
       if (placeholder) placeholder.disabled = true;
       for (const task of tasks) {
