@@ -1,8 +1,11 @@
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
@@ -26,8 +29,15 @@ impl ExplicitFileLock {
         self.0.sync_all()
     }
 
+    #[cfg(unix)]
     pub(crate) fn as_raw_fd(&self) -> i32 {
         self.0.as_raw_fd()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
+        use std::os::windows::io::AsRawHandle;
+        self.0.as_raw_handle()
     }
 
     #[cfg(test)]
@@ -58,10 +68,18 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn from_home(home: &Path) -> Self {
+        #[cfg(windows)]
+        let root = home
+            .join("AppData")
+            .join("Roaming")
+            .join(APP_SUPPORT_DIRECTORY);
+
+        #[cfg(not(windows))]
         let root = home
             .join("Library")
             .join("Application Support")
             .join(APP_SUPPORT_DIRECTORY);
+
         Self::from_root(root)
     }
 
@@ -85,11 +103,26 @@ impl AppPaths {
     }
 }
 
+#[cfg(unix)]
 pub fn secure_directory(path: &Path) -> io::Result<()> {
     let directory = open_owned_directory_chain(path, true)?;
     directory.set_permissions(fs::Permissions::from_mode(0o700))
 }
 
+#[cfg(windows)]
+pub fn secure_directory(path: &Path) -> io::Result<()> {
+    if !path.is_absolute() {
+        return Err(invalid_path("private paths must be absolute"));
+    }
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(invalid_path("parent path is not allowed"));
+        }
+    }
+    fs::create_dir_all(path)
+}
+
+#[cfg(unix)]
 pub fn open_private_file(path: &Path) -> io::Result<File> {
     let parent = path
         .parent()
@@ -106,6 +139,28 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+#[cfg(windows)]
+pub fn open_private_file(path: &Path) -> io::Result<File> {
+    if !path.is_absolute() {
+        return Err(invalid_path("private paths must be absolute"));
+    }
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(invalid_path("parent path is not allowed"));
+        }
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+}
+
+#[cfg(unix)]
 pub(crate) fn replace_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent_path = path
         .parent()
@@ -169,6 +224,50 @@ pub(crate) fn replace_private_file(path: &Path, contents: &[u8]) -> io::Result<(
     result
 }
 
+#[cfg(windows)]
+pub(crate) fn replace_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid_path("private file has no parent directory"))?;
+    let file_name = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| invalid_path("private file has no file name"))?;
+    fs::create_dir_all(parent)?;
+    let temporary_name = format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    );
+    let temporary_path = parent.join(temporary_name);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    file.rewind()?;
+    let mut readback = Zeroizing::new(Vec::with_capacity(contents.len().saturating_add(1)));
+    (&file)
+        .take(contents.len().saturating_add(1) as u64)
+        .read_to_end(&mut readback)?;
+    if readback.as_slice() != contents {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(invalid_path("private temporary file readback mismatch"));
+    }
+    drop(file);
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+    if let Err(e) = fs::rename(&temporary_path, path) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(e);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 pub(crate) fn open_file_at(
     directory: &File,
     name: &std::ffi::OsStr,
@@ -195,6 +294,23 @@ pub(crate) fn open_file_at(
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn open_file_at(
+    directory: &File,
+    name: &std::ffi::OsStr,
+    create: bool,
+) -> io::Result<File> {
+    let dir_path = path_from_dir_handle(directory)?;
+    let target = dir_path.join(name);
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    if create {
+        opts.write(true).create(true).truncate(false);
+    }
+    opts.open(target)
+}
+
+#[cfg(unix)]
 pub(crate) fn directory_names_at(directory: &File) -> io::Result<Vec<OsString>> {
     let duplicated = unsafe {
         libc::openat(
@@ -236,6 +352,18 @@ pub(crate) fn directory_names_at(directory: &File) -> io::Result<Vec<OsString>> 
     Ok(names)
 }
 
+#[cfg(windows)]
+pub(crate) fn directory_names_at(directory: &File) -> io::Result<Vec<OsString>> {
+    let dir_path = path_from_dir_handle(directory)?;
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir_path)? {
+        let entry = entry?;
+        names.push(entry.file_name());
+    }
+    Ok(names)
+}
+
+#[cfg(unix)]
 pub(crate) fn metadata_at(directory: &File, name: &OsStr) -> io::Result<libc::stat> {
     let name = CString::new(name.as_bytes()).map_err(|_| invalid_path("file name contains NUL"))?;
     let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -253,12 +381,48 @@ pub(crate) fn metadata_at(directory: &File, name: &OsStr) -> io::Result<libc::st
     Ok(unsafe { metadata.assume_init() })
 }
 
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+pub struct HostStat {
+    pub st_size: i64,
+    pub st_mode: u32,
+    pub st_uid: u32,
+    pub is_regular: bool,
+}
+
+#[cfg(windows)]
+pub(crate) fn metadata_at(directory: &File, name: &OsStr) -> io::Result<HostStat> {
+    let dir_path = path_from_dir_handle(directory)?;
+    let target = dir_path.join(name);
+    let meta = fs::symlink_metadata(target)?;
+    Ok(HostStat {
+        st_size: meta.len() as i64,
+        st_mode: if meta.is_file() { 0o100600 } else { 0o040700 },
+        st_uid: 0,
+        is_regular: meta.is_file(),
+    })
+}
+
+#[cfg(unix)]
 pub(crate) fn unlink_file_at(directory: &File, name: &OsStr) -> io::Result<()> {
     let name = CString::new(name.as_bytes()).map_err(|_| invalid_path("file name contains NUL"))?;
     if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn unlink_file_at(directory: &File, name: &OsStr) -> io::Result<()> {
+    let dir_path = path_from_dir_handle(directory)?;
+    let target = dir_path.join(name);
+    if target.is_dir() {
+        fs::remove_dir(target)
+    } else if target.exists() {
+        fs::remove_file(target)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -271,16 +435,19 @@ fn errno_pointer() -> *mut libc::c_int {
     unsafe { libc::__errno_location() }
 }
 
+#[cfg(unix)]
 fn set_errno(value: libc::c_int) {
     unsafe {
         *errno_pointer() = value;
     }
 }
 
+#[cfg(unix)]
 fn get_errno() -> libc::c_int {
     unsafe { *errno_pointer() }
 }
 
+#[cfg(unix)]
 pub(crate) fn open_owned_directory_chain(path: &Path, create_missing: bool) -> io::Result<File> {
     if !path.is_absolute() {
         return Err(invalid_path("private paths must be absolute"));
@@ -369,16 +536,92 @@ pub(crate) fn open_owned_directory_chain(path: &Path, create_missing: bool) -> i
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn open_owned_directory_chain(path: &Path, create_missing: bool) -> io::Result<File> {
+    if !path.is_absolute() {
+        return Err(invalid_path("private paths must be absolute"));
+    }
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(invalid_path("parent path is not allowed"));
+        }
+    }
+    if create_missing && !path.exists() {
+        fs::create_dir_all(path)?;
+    }
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn path_from_dir_handle(file: &File) -> io::Result<PathBuf> {
+    use std::os::windows::io::AsRawHandle;
+    let handle = file.as_raw_handle();
+    let mut buf = vec![0u16; 1024];
+    let len = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW(
+            handle as _,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            0,
+        )
+    };
+    if len == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len > buf.len() as u32 {
+        buf.resize(len as usize, 0);
+        let len2 = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW(
+                handle as _,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                0,
+            )
+        };
+        if len2 == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    let s = String::from_utf16_lossy(&buf[..len as usize]);
+    let clean = if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        stripped.to_string()
+    } else {
+        s
+    };
+    Ok(PathBuf::from(clean))
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_file_identity(file: &File) -> io::Result<(u32, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let file_index = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+    Ok((info.dwVolumeSerialNumber, file_index))
+}
+
 #[cfg(target_os = "macos")]
 fn sticky_directory_bit() -> u32 {
     u32::from(libc::S_ISVTX)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn sticky_directory_bit() -> u32 {
     libc::S_ISVTX
 }
 
+#[cfg(unix)]
 fn resolve_root_owned_symlink_prefix(path: &Path) -> io::Result<PathBuf> {
     let effective_uid = unsafe { libc::geteuid() };
     let mut resolved = PathBuf::from("/");
@@ -413,6 +656,7 @@ fn resolve_root_owned_symlink_prefix(path: &Path) -> io::Result<PathBuf> {
     Ok(resolved)
 }
 
+#[cfg(unix)]
 fn validate_owned_type(metadata: &fs::Metadata, directory: bool) -> io::Result<()> {
     let correct_type = if directory {
         metadata.is_dir()
@@ -438,7 +682,7 @@ fn invalid_path(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tempfile::tempdir;

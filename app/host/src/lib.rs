@@ -4,6 +4,7 @@ pub mod cache;
 pub mod codex_catalog;
 pub mod codex_runner;
 pub mod dashscope;
+mod harness_runner;
 pub mod health;
 pub mod lan_playback;
 pub mod lan_voice;
@@ -17,6 +18,5 @@ pub mod spark_runner;
 pub mod store;
 pub mod summary;
 pub mod summary_orchestrator;
-#[cfg(target_os = "macos")]
 pub mod summary_worker;
 pub mod tts_cache;

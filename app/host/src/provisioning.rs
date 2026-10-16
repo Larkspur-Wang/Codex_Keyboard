@@ -1,11 +1,12 @@
 use std::fs;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::thread;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -22,17 +23,17 @@ const REPORT_BODY_BYTES: usize = REPORT_BYTES - 1;
 const CONFIG_HEADER_BYTES: usize = 11;
 const CONFIG_CHUNK_BYTES: usize = REPORT_BODY_BYTES - CONFIG_HEADER_BYTES;
 const MAX_CONFIG_BYTES: usize = 2048;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const APP_COMMAND_REPORT_ID: u8 = 0x11;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const APP_COMMAND_CONFIG_ACK: u8 = 0x03;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(4);
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const EASY_INPUT_USB_VID: u16 = 0x303A;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const EASY_INPUT_USB_PID: u16 = 0x1006;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const EASY_INPUT_USB_INTERFACE: i32 = 0;
 
 #[derive(Debug, Error)]
@@ -206,11 +207,16 @@ pub fn load_device_secret(paths: &AppPaths) -> Result<[u8; 32], ProvisioningErro
 
 pub(crate) fn load_device_secret_path(path: &Path) -> Result<[u8; 32], ProvisioningError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| ProvisioningError::InvalidPayload)?;
+    #[cfg(unix)]
     if !metadata.is_file()
         || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.permissions().mode() & 0o077 != 0
         || metadata.len() != 65
     {
+        return Err(ProvisioningError::InvalidPayload);
+    }
+    #[cfg(not(unix))]
+    if !metadata.is_file() || metadata.len() != 65 {
         return Err(ProvisioningError::InvalidPayload);
     }
     let mut file = open_private_file(path).map_err(|_| ProvisioningError::InvalidPayload)?;
@@ -233,12 +239,25 @@ pub fn load_or_create_device_secret(paths: &AppPaths) -> Result<[u8; 32], Provis
     paths
         .prepare()
         .map_err(|_| ProvisioningError::InvalidPayload)?;
-    let mut random =
-        fs::File::open("/dev/urandom").map_err(|_| ProvisioningError::InvalidPayload)?;
+    #[cfg(unix)]
     let mut secret = [0_u8; 32];
-    random
-        .read_exact(&mut secret)
-        .map_err(|_| ProvisioningError::InvalidPayload)?;
+    #[cfg(unix)]
+    {
+        let mut random =
+            fs::File::open("/dev/urandom").map_err(|_| ProvisioningError::InvalidPayload)?;
+        random
+            .read_exact(&mut secret)
+            .map_err(|_| ProvisioningError::InvalidPayload)?;
+    }
+    #[cfg(not(unix))]
+    let secret = {
+        let mut secret = [0_u8; 32];
+        let uuid1 = uuid::Uuid::new_v4();
+        let uuid2 = uuid::Uuid::new_v4();
+        secret[..16].copy_from_slice(uuid1.as_bytes());
+        secret[16..].copy_from_slice(uuid2.as_bytes());
+        secret
+    };
     if secret.iter().all(|byte| *byte == 0) {
         return Err(ProvisioningError::InvalidPayload);
     }
@@ -251,22 +270,23 @@ pub fn load_or_create_device_secret(paths: &AppPaths) -> Result<[u8; 32], Provis
 }
 
 pub fn provision_lan(config: &LanProvisioning) -> Result<ProvisioningReceipt, ProvisioningError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        provision_lan_macos(config)
+        provision_lan_hid(config)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = config;
         Err(ProvisioningError::UnsupportedPlatform)
     }
 }
 
-#[cfg(target_os = "macos")]
-fn provision_lan_macos(config: &LanProvisioning) -> Result<ProvisioningReceipt, ProvisioningError> {
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn provision_lan_hid(config: &LanProvisioning) -> Result<ProvisioningReceipt, ProvisioningError> {
     let payload = config.payload_json()?;
     let reports = encode_reports(&payload)?;
     let api = hidapi::HidApi::new().map_err(|_| ProvisioningError::Hid)?;
+    #[cfg(target_os = "macos")]
     api.set_open_exclusive(false);
     let candidates = api
         .device_list()
@@ -320,14 +340,14 @@ fn provision_lan_macos(config: &LanProvisioning) -> Result<ProvisioningReceipt, 
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn is_easy_input_usb_interface(vendor_id: u16, product_id: u16, interface: i32) -> bool {
     vendor_id == EASY_INPUT_USB_VID
         && product_id == EASY_INPUT_USB_PID
-        && (interface == EASY_INPUT_USB_INTERFACE || (cfg!(target_os = "macos") && interface == -1))
+        && (interface == EASY_INPUT_USB_INTERFACE || interface == -1)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn wait_for_config_ack(
     device: &hidapi::HidDevice,
     expected_bytes: usize,
@@ -361,7 +381,7 @@ fn wait_for_config_ack(
     Err(ProvisioningError::Hid)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ConfigAck {
     phase: u8,
@@ -371,7 +391,7 @@ struct ConfigAck {
     saved: bool,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn decode_config_ack(report: &[u8]) -> Option<ConfigAck> {
     if report.len() < 12
         || report[0] != APP_COMMAND_REPORT_ID
@@ -457,7 +477,7 @@ fn decode_secret_hex(value: &str) -> Result<[u8; 32], ProvisioningError> {
     Ok(secret)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;

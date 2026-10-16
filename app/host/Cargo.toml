@@ -26,9 +26,17 @@ rustls-native-certs.workspace = true
 sha1.workspace = true
 signal-hook.workspace = true
 tempfile.workspace = true
+hidapi.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework.workspace = true
 security-framework-sys.workspace = true
 core-foundation.workspace = true
-hidapi.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }

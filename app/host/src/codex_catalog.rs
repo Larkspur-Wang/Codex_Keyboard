@@ -1,7 +1,9 @@
+use crate::rollout_observer::FileReadAt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{FileExt as UnixFileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::fs::{FileExt as UnixFileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -105,7 +107,11 @@ impl CodexTaskCatalog {
     }
 
     pub fn from_environment() -> Result<Self, CatalogError> {
-        let home = PathBuf::from(std::env::var_os("HOME").ok_or(CatalogError::InvalidIndex)?);
+        let home = PathBuf::from(
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .ok_or(CatalogError::InvalidIndex)?,
+        );
         let codex_home = match std::env::var_os("CODEX_HOME") {
             Some(value) => PathBuf::from(value),
             None => home.join(".codex"),
@@ -436,10 +442,11 @@ fn is_user_owned_thread(source: &str, thread_source: &str, agent_role: &str) -> 
 
 fn pinned_ids(global: &serde_json::Value) -> Result<Vec<String>, CatalogError> {
     let object = global.as_object().ok_or(CatalogError::InvalidIndex)?;
-    let values = object
-        .get("pinned-thread-ids")
-        .and_then(serde_json::Value::as_array)
-        .ok_or(CatalogError::InvalidIndex)?;
+    let values = match object.get("pinned-thread-ids") {
+        None | Some(serde_json::Value::Null) => &[][..],
+        Some(serde_json::Value::Array(items)) => items.as_slice(),
+        _ => return Err(CatalogError::InvalidIndex),
+    };
     if values.len() > MAX_PINNED_CANDIDATES {
         return Err(CatalogError::IndexTooLarge);
     }
@@ -593,7 +600,12 @@ fn validate_rollout_path(codex_home: &Path, path: &Path) -> Result<bool, Catalog
         Err(_) => return Err(CatalogError::UnsafePath),
     };
     let metadata = file.metadata()?;
+    #[cfg(unix)]
     if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(CatalogError::UnsafePath);
+    }
+    #[cfg(not(unix))]
+    if !metadata.is_file() {
         return Err(CatalogError::UnsafePath);
     }
     Ok(true)
@@ -640,11 +652,14 @@ impl GuardedDatabaseFile {
 
     fn copy_to(&self, destination: &Path) -> Result<FileDigest, CatalogError> {
         self.verify()?;
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(destination)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options.open(destination)?;
         let digest = hash_guarded_file(&self.file, self.max_bytes, Some(&mut output))?;
         output.sync_all()?;
         Ok(digest)
@@ -770,12 +785,21 @@ impl ManagedSnapshotRoot {
             let path = self.path.join(format!("snapshot-{}", Uuid::new_v4()));
             match fs::create_dir(&path) {
                 Ok(()) => {
-                    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+                    }
                     let metadata = fs::symlink_metadata(&path)?;
+                    #[cfg(unix)]
                     if !metadata.is_dir()
                         || metadata.uid() != unsafe { libc::geteuid() }
                         || metadata.permissions().mode() & 0o777 != 0o700
                     {
+                        return Err(CatalogError::UnsafePath);
+                    }
+                    #[cfg(not(unix))]
+                    if !metadata.is_dir() {
                         return Err(CatalogError::UnsafePath);
                     }
                     return Ok(path);
@@ -809,7 +833,12 @@ impl ManagedSnapshotRoot {
 
 fn remove_managed_snapshot_directory(path: &Path) -> Result<(), CatalogError> {
     let metadata = fs::symlink_metadata(path)?;
+    #[cfg(unix)]
     if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(CatalogError::UnsafePath);
+    }
+    #[cfg(not(unix))]
+    if !metadata.is_dir() {
         return Err(CatalogError::UnsafePath);
     }
     for entry in fs::read_dir(path)? {
@@ -822,10 +851,15 @@ fn remove_managed_snapshot_directory(path: &Path) -> Result<(), CatalogError> {
             return Err(CatalogError::UnsafePath);
         }
         let metadata = fs::symlink_metadata(entry.path())?;
+        #[cfg(unix)]
         if metadata.file_type().is_symlink()
             || !metadata.is_file()
             || metadata.uid() != unsafe { libc::geteuid() }
         {
+            return Err(CatalogError::UnsafePath);
+        }
+        #[cfg(not(unix))]
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(CatalogError::UnsafePath);
         }
         fs::remove_file(entry.path())?;
@@ -927,10 +961,11 @@ fn hash_guarded_file(
 
 fn open_guarded_regular_file(path: &Path, max_bytes: u64) -> Result<File, CatalogError> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-    {
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(CatalogError::UnsafePath);
+    }
+    #[cfg(unix)]
+    if metadata.uid() != unsafe { libc::geteuid() } {
         return Err(CatalogError::UnsafePath);
     }
     if metadata.len() > max_bytes {
@@ -938,18 +973,56 @@ fn open_guarded_regular_file(path: &Path, max_bytes: u64) -> Result<File, Catalo
     }
     let file = File::open(path)?;
     let opened = file.metadata()?;
-    if !opened.is_file()
-        || opened.uid() != unsafe { libc::geteuid() }
+    if !opened.is_file() {
+        return Err(CatalogError::UnsafePath);
+    }
+    #[cfg(unix)]
+    if opened.uid() != unsafe { libc::geteuid() }
         || (opened.dev(), opened.ino()) != (metadata.dev(), metadata.ino())
     {
         return Err(CatalogError::UnsafePath);
+    }
+    #[cfg(windows)]
+    {
+        let _ = file_identity(&file)?;
     }
     Ok(file)
 }
 
 fn file_identity(file: &File) -> Result<(u64, u64), CatalogError> {
-    let metadata = file.metadata()?;
-    Ok((metadata.dev(), metadata.ino()))
+    #[cfg(unix)]
+    {
+        let metadata = file.metadata()?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        let handle = file.as_raw_handle();
+        let mut info = std::mem::MaybeUninit::<
+            windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION,
+        >::uninit();
+        let success = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle(
+                handle as _,
+                info.as_mut_ptr(),
+            )
+        };
+        if success != 0 {
+            let info = unsafe { info.assume_init() };
+            Ok((
+                info.dwVolumeSerialNumber as u64,
+                ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64),
+            ))
+        } else {
+            Err(CatalogError::Io(std::io::Error::last_os_error()))
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Ok((0, 0))
+    }
 }
 
 fn ensure_path_identity(path: &Path, expected: (u64, u64)) -> Result<(), CatalogError> {
@@ -962,12 +1035,20 @@ fn ensure_path_identity_bounded(
     max_bytes: u64,
 ) -> Result<(), CatalogError> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || (metadata.dev(), metadata.ino()) != expected
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(CatalogError::UnsafePath);
+    }
+    #[cfg(unix)]
+    if metadata.uid() != unsafe { libc::geteuid() } || (metadata.dev(), metadata.ino()) != expected
     {
         return Err(CatalogError::UnsafePath);
+    }
+    #[cfg(windows)]
+    {
+        let file = File::open(path)?;
+        if file_identity(&file)? != expected {
+            return Err(CatalogError::UnsafePath);
+        }
     }
     if metadata.len() > max_bytes {
         return Err(CatalogError::IndexTooLarge);
@@ -975,7 +1056,7 @@ fn ensure_path_identity_bounded(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::cell::Cell;
     use std::os::unix::fs::symlink;

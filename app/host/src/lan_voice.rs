@@ -2,12 +2,13 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, UdpSocket};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -143,10 +144,15 @@ pub fn import_default_whisper_model(
     source: &Path,
 ) -> Result<WhisperModelReceipt, LanVoiceError> {
     let metadata = fs::symlink_metadata(source)?;
+    #[cfg(unix)]
     if !metadata.is_file()
         || metadata.uid() != unsafe { libc::geteuid() }
         || !(MIN_MODEL_BYTES..=MAX_MODEL_BYTES).contains(&metadata.len())
     {
+        return Err(LanVoiceError::AsrUnavailable);
+    }
+    #[cfg(not(unix))]
+    if !metadata.is_file() || !(MIN_MODEL_BYTES..=MAX_MODEL_BYTES).contains(&metadata.len()) {
         return Err(LanVoiceError::AsrUnavailable);
     }
     let model_directory = paths.root.join("models");
@@ -157,6 +163,7 @@ pub fn import_default_whisper_model(
         .prefix(".ggml-base-")
         .suffix(".tmp")
         .tempfile_in(&model_directory)?;
+    #[cfg(unix)]
     output
         .as_file()
         .set_permissions(fs::Permissions::from_mode(0o600))?;
@@ -244,7 +251,53 @@ impl LanVoiceConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanVoiceStatus {
+    pub listening_port: u16,
+    pub received_datagrams: u64,
+    pub authenticated_heartbeats: u64,
+    pub last_heartbeat_age_ms: Option<u64>,
+}
+
+#[cfg(test)]
+mod connection_status_tests {
+    use super::*;
+
+    #[test]
+    fn forged_heartbeats_never_report_an_authenticated_keyboard() {
+        let host = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let device = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let playback = ActiveLanPlayback::default();
+        let key = [42; 32];
+        let mut heartbeat = [0_u8; AUTHENTICATED_HEARTBEAT_BYTES];
+        heartbeat[..4].copy_from_slice(b"EIHB");
+        heartbeat[4] = 1;
+        heartbeat[5] = 2;
+        heartbeat[20..24].copy_from_slice(b"EISD");
+        heartbeat[24] = 1;
+        heartbeat[25] = 60;
+        heartbeat[26..28].copy_from_slice(&2_u16.to_le_bytes());
+        assert!(!playback.handle_heartbeat(&heartbeat, device.local_addr().unwrap(), &key, &host));
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        mac.update(HEARTBEAT_AUTH_CONTEXT);
+        mac.update(&heartbeat[..64]);
+        heartbeat[64..].copy_from_slice(&mac.finalize().into_bytes()[..16]);
+        assert!(playback.handle_heartbeat(&heartbeat, device.local_addr().unwrap(), &key, &host));
+        heartbeat[64] ^= 1;
+        assert!(!playback.handle_heartbeat(&heartbeat, device.local_addr().unwrap(), &key, &host));
+    }
+}
+
+#[derive(Default)]
+struct LanDiagnostics {
+    received_datagrams: u64,
+    authenticated_heartbeats: u64,
+    last_heartbeat: Option<Instant>,
+}
+
 pub struct LanVoiceIngress {
+    diagnostics: Arc<Mutex<LanDiagnostics>>,
     receiver: Receiver<LanVoicePrompt>,
     shutdown: Arc<AtomicBool>,
     ingress_worker: Option<JoinHandle<()>>,
@@ -273,6 +326,7 @@ impl LanVoiceIngress {
                     match capture_receiver.recv_timeout(RECEIVE_POLL) {
                         Ok(capture) => match transcriber.transcribe(capture) {
                             Ok(prompt) => {
+                                eprintln!("lan_voice_asr=completed slot={}", prompt.slot);
                                 if prompt_sender.send(prompt).is_err() {
                                     return;
                                 }
@@ -287,6 +341,8 @@ impl LanVoiceIngress {
                 }
             })?;
         let ingress_shutdown = Arc::clone(&shutdown);
+        let diagnostics = Arc::new(Mutex::new(LanDiagnostics::default()));
+        let ingress_diagnostics = Arc::clone(&diagnostics);
         let ingress_worker = match thread::Builder::new()
             .name("eci-lan-voice".to_owned())
             .spawn(move || {
@@ -312,12 +368,22 @@ impl LanVoiceIngress {
                     }
                     match socket.recv_from(&mut datagram) {
                         Ok((length, source)) => {
+                            if let Ok(mut status) = ingress_diagnostics.lock() {
+                                status.received_datagrams =
+                                    status.received_datagrams.saturating_add(1);
+                            }
                             let packet = &datagram[..length];
                             let heartbeat_packet = packet.starts_with(b"EIHB");
                             let playback_packet = packet.len() >= 4 && &packet[..3] == b"EIP";
                             if heartbeat_packet {
                                 if let Some(key) = assembler.auth_key.as_ref() {
-                                    playback.handle_heartbeat(packet, source, key, &socket);
+                                    if playback.handle_heartbeat(packet, source, key, &socket) {
+                                        if let Ok(mut status) = ingress_diagnostics.lock() {
+                                            status.authenticated_heartbeats =
+                                                status.authenticated_heartbeats.saturating_add(1);
+                                            status.last_heartbeat = Some(Instant::now());
+                                        }
+                                    }
                                 }
                             } else if playback_packet {
                                 if let Some(key) = assembler.auth_key.as_ref() {
@@ -371,6 +437,7 @@ impl LanVoiceIngress {
             }
         };
         Ok(Self {
+            diagnostics,
             receiver,
             shutdown,
             ingress_worker: Some(ingress_worker),
@@ -387,6 +454,21 @@ impl LanVoiceIngress {
 
     pub fn local_port(&self) -> u16 {
         self.local_port
+    }
+
+    pub fn status(&self) -> LanVoiceStatus {
+        let status = self
+            .diagnostics
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        LanVoiceStatus {
+            listening_port: self.local_port,
+            received_datagrams: status.received_datagrams,
+            authenticated_heartbeats: status.authenticated_heartbeats,
+            last_heartbeat_age_ms: status
+                .last_heartbeat
+                .map(|last| last.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+        }
     }
 
     pub fn try_recv_playback(&self) -> Option<LanPlaybackEvent> {
@@ -591,7 +673,7 @@ impl ActiveLanPlayback {
         source: SocketAddr,
         key: &[u8; 32],
         socket: &UdpSocket,
-    ) {
+    ) -> bool {
         if packet.len() != AUTHENTICATED_HEARTBEAT_BYTES
             || packet[..4] != *b"EIHB"
             || packet[4] != 1
@@ -602,10 +684,10 @@ impl ActiveLanPlayback {
             || packet[25] != 60
             || u16::from_le_bytes(packet[26..28].try_into().unwrap()) & 0x0002 == 0
         {
-            return;
+            return false;
         }
         let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(key) else {
-            return;
+            return false;
         };
         mac.update(HEARTBEAT_AUTH_CONTEXT);
         mac.update(&packet[..64]);
@@ -617,15 +699,16 @@ impl ActiveLanPlayback {
                 difference | (expected ^ actual)
             });
         if tag_difference != 0 {
-            return;
+            return false;
         }
         let heartbeat_sequence = u32::from_le_bytes(packet[16..20].try_into().unwrap());
         let Ok(response) = encode_mailbox_status(self.mailbox_status, heartbeat_sequence, key)
         else {
-            return;
+            return false;
         };
         debug_assert_eq!(response.len(), MAILBOX_STATUS_BYTES);
         let _ = socket.send_to(&response, source);
+        true
     }
 
     fn ingest(
@@ -1497,7 +1580,7 @@ fn asr_error_code(error: AsrError) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;

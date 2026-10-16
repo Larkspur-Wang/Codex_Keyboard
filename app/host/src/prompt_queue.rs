@@ -55,10 +55,12 @@ impl<'a> PromptQueueService<'a> {
 struct WorkerResult {
     request_id: String,
     claim_generation: u64,
-    result: Result<(), JobFailureKind>,
+    job: Job,
+    result: Result<Option<String>, JobFailureKind>,
 }
 
 struct Worker {
+    task_id: String,
     cancel: Arc<AtomicBool>,
     handle: JoinHandle<()>,
 }
@@ -87,10 +89,20 @@ impl DurablePromptScheduler {
                 let _ = worker.handle.join();
             }
             match outcome.result {
-                Ok(()) => {
+                Ok(Some(reply)) => {
+                    store.complete_harness_job(&outcome.job, &reply)?;
+                    eprintln!("deepseek_harness=completed slot={}", outcome.job.slot);
+                }
+                Ok(None) => {
+                    println!("【任务执行完成】request_id={}", outcome.request_id);
+                    eprintln!("job_completed request_id={}", outcome.request_id);
                     store.mark_completed(&outcome.request_id, outcome.claim_generation)?;
                 }
                 Err(failure) => {
+                    eprintln!(
+                        "【任务执行失败】request_id={} error={:?}",
+                        outcome.request_id, failure
+                    );
                     store.mark_failed(&outcome.request_id, outcome.claim_generation, failure)?;
                 }
             }
@@ -109,6 +121,13 @@ impl DurablePromptScheduler {
         self.workers.len()
     }
 
+    pub fn running_tasks(&self) -> std::collections::BTreeSet<String> {
+        self.workers
+            .values()
+            .map(|worker| worker.task_id.clone())
+            .collect()
+    }
+
     pub fn shutdown_without_acknowledging(&mut self) {
         for worker in self.workers.values() {
             worker.cancel.store(true, Ordering::Release);
@@ -120,25 +139,35 @@ impl DurablePromptScheduler {
     }
 
     fn start(&mut self, job: Job) {
+        eprintln!("job_started slot={}", job.slot);
         let request_id = job.request_id.clone();
         let result_id = request_id.clone();
         let claim_generation = job.claim_generation;
+        let task_id = job.task_id.clone();
         let runner = self.runner.clone();
         let sender = self.sender.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         let handle = thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                runner.run_with_cancel(&job, &worker_cancel)
+                runner.run_with_cancel_output(&job, &worker_cancel)
             }))
             .unwrap_or(Err(JobFailureKind::ProcessIo));
             let _ = sender.send(WorkerResult {
                 request_id: result_id,
                 claim_generation,
+                job,
                 result,
             });
         });
-        self.workers.insert(request_id, Worker { cancel, handle });
+        self.workers.insert(
+            request_id,
+            Worker {
+                task_id,
+                cancel,
+                handle,
+            },
+        );
     }
 }
 
@@ -148,7 +177,7 @@ impl Drop for DurablePromptScheduler {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;

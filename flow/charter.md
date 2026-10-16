@@ -7,7 +7,7 @@
 
 ## 当前范围
 
-- macOS Rust Host + Tauri 管理 App。
+- macOS/Windows Rust Host + Tauri 管理 App；Windows 可按用户明确选择使用本地 DeepSeek Harness。
 - EasyInput V2 ESP-IDF 固件。
 - USB/BLE 下发 Wi-Fi 与 Host 端点配置。
 - 同局域网 Qwen ASR、Codex FIFO、rollout observer、Spark 累计总结、Qwen TTS、加密缓存和

@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -241,7 +243,7 @@ pub struct ObserverStateStore {
 impl StateStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         if let Some(parent) = path.parent() {
-            crate::paths::secure_directory(parent)?;
+            crate::paths::secure_directory(parent).map_err(StoreError::Io)?;
         }
         let lock_path = lock_path(path);
         let instance_lock = open_private_file(&lock_path)?;
@@ -389,7 +391,7 @@ impl StateStore {
                 && existing.1 == job.slot
                 && existing.2 == to_i64(job.generation)?
                 && existing.3 == job.prompt
-                && existing.4 == job.cwd.as_os_str().as_bytes();
+                && existing.4 == job.cwd.as_os_str().as_encoded_bytes();
             transaction.rollback()?;
             return if exact_replay {
                 Ok(EnqueueOutcome::Replay)
@@ -418,7 +420,7 @@ impl StateStore {
                 job.slot,
                 to_i64(job.generation)?,
                 job.prompt,
-                job.cwd.as_os_str().as_bytes()
+                job.cwd.as_os_str().as_encoded_bytes()
             ],
         )?;
         transaction.commit()?;
@@ -596,6 +598,12 @@ impl StateStore {
             .optional()?)
     }
 
+    pub fn clear_binding(&mut self, slot: u8) -> Result<(), StoreError> {
+        self.connection
+            .execute("DELETE FROM bindings WHERE slot = ?1", [slot])?;
+        Ok(())
+    }
+
     pub fn bindings(&self) -> Result<Vec<Binding>, StoreError> {
         query_bindings(&self.connection)
     }
@@ -610,6 +618,50 @@ impl StateStore {
              WHERE request_id = ?1 AND state = 'running' AND claim_generation = ?2",
             params![request_id, to_i64(claim_generation)?],
         )? == 1)
+    }
+
+    /// Commit a verified native Harness reply and its job atomically. This
+    /// completion has its own provenance and never advances a Codex cursor.
+    pub(crate) fn complete_harness_job(
+        &mut self,
+        job: &Job,
+        reply: &str,
+    ) -> Result<bool, StoreError> {
+        if reply.trim().is_empty() || reply.len() > 256 * 1024 {
+            return Err(StoreError::InvalidJob);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE jobs SET state='completed', updated_at=unixepoch()
+             WHERE request_id=?1 AND task_id=?2 AND state='running' AND claim_generation=?3 AND slot=?4 AND generation=?5",
+            params![job.request_id, job.task_id, to_i64(job.claim_generation)?, job.slot, to_i64(job.generation)?],
+        )?;
+        if changed == 0 {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let bound: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM bindings WHERE slot=?1 AND task_id=?2 AND generation=?3)",
+            params![job.slot, job.task_id, to_i64(job.generation)?],
+            |row| row.get(0),
+        )?;
+        if bound {
+            let completion_id = uuid::Uuid::new_v4().to_string();
+            let pack = serde_json::json!({
+                "v": 1, "turn_id": completion_id, "executor": "deepseek",
+                "user": [], "assistant": [reply], "tools": []
+            })
+            .to_string();
+            transaction.execute(
+                "INSERT INTO completion_ledger (completion_id, task_id, rollout_cursor, observed_at, turn_pack)
+                 VALUES (?1, ?2, ?3, unixepoch(), ?4)",
+                params![completion_id, job.task_id, format!("deepseek:{}", job.claim_generation), pack],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 
     pub fn mark_failed(
@@ -1818,7 +1870,7 @@ fn commit_rollout_completion_on(
            updated_at = excluded.updated_at",
         params![
             next.task_id,
-            next.rollout_path.as_os_str().as_bytes(),
+            next.rollout_path.as_os_str().as_encoded_bytes(),
             to_sql_i64(next.device)?,
             to_sql_i64(next.inode)?,
             to_sql_i64(next.offset)?,
@@ -2186,24 +2238,32 @@ fn recover_interrupted_playback_leases(connection: &mut Connection) -> Result<()
     Ok(())
 }
 
-fn map_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
-    use std::os::unix::ffi::OsStringExt;
+fn path_from_blob(bytes: Vec<u8>) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        PathBuf::from(std::ffi::OsString::from_vec(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(&bytes).as_ref())
+    }
+}
 
+fn map_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
     Ok(Job {
         request_id: row.get(0)?,
         task_id: row.get(1)?,
         slot: row.get(2)?,
         generation: row.get::<_, i64>(3)? as u64,
         prompt: row.get(4)?,
-        cwd: PathBuf::from(std::ffi::OsString::from_vec(row.get(5)?)),
+        cwd: path_from_blob(row.get(5)?),
         recovery_count: row.get(6)?,
         claim_generation: row.get::<_, i64>(7)? as u64,
     })
 }
 
 fn map_rollout_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<RolloutCursor> {
-    use std::os::unix::ffi::OsStringExt;
-
     let anchor = row
         .get::<_, Vec<u8>>(6)?
         .try_into()
@@ -2219,7 +2279,7 @@ fn map_rollout_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<RolloutCursor
         })?;
     Ok(RolloutCursor {
         task_id: row.get(0)?,
-        rollout_path: PathBuf::from(std::ffi::OsString::from_vec(row.get(1)?)),
+        rollout_path: path_from_blob(row.get(1)?),
         device: row.get::<_, i64>(2)? as u64,
         inode: row.get::<_, i64>(3)? as u64,
         offset: row.get::<_, i64>(4)? as u64,
@@ -2234,7 +2294,7 @@ fn validate_rollout_completion(
     completion_id: &str,
     turn_pack: &str,
 ) -> Result<(), StoreError> {
-    let path = next.rollout_path.as_os_str().as_bytes();
+    let path = next.rollout_path.as_os_str().as_encoded_bytes();
     let base_valid = uuid::Uuid::parse_str(&next.task_id).is_ok()
         && uuid::Uuid::parse_str(completion_id).is_ok()
         && next.rollout_path.is_absolute()
@@ -2282,7 +2342,7 @@ fn validate_job(job: &NewJob<'_>) -> Result<(), StoreError> {
         && job.task_id.len() <= MAX_TASK_ID_BYTES
         && !job.task_id.bytes().any(|byte| byte.is_ascii_control());
     let prompt_ok = !job.prompt.trim().is_empty() && job.prompt.len() <= MAX_PROMPT_BYTES;
-    let cwd = job.cwd.as_os_str().as_bytes();
+    let cwd = job.cwd.as_os_str().as_encoded_bytes();
     let cwd_ok =
         job.cwd.is_absolute() && !cwd.is_empty() && cwd.len() <= MAX_CWD_BYTES && !cwd.contains(&0);
     if request_ok && task_ok && prompt_ok && cwd_ok {
@@ -2341,13 +2401,27 @@ fn ensure_guarded_sidecars(guards: &[(PathBuf, File)]) -> Result<(), StoreError>
 }
 
 fn ensure_file_identity(file: &File, path: &Path) -> Result<(), StoreError> {
+    #[cfg(unix)]
     let opened = file.metadata()?;
     let current = fs::symlink_metadata(path)?;
-    if current.file_type().is_symlink()
-        || opened.dev() != current.dev()
-        || opened.ino() != current.ino()
-    {
+    if current.file_type().is_symlink() {
         return Err(StoreError::StatePathChanged);
+    }
+    #[cfg(unix)]
+    {
+        if opened.dev() != current.dev() || opened.ino() != current.ino() {
+            return Err(StoreError::StatePathChanged);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let opened_id = crate::paths::windows_file_identity(file).map_err(StoreError::Io)?;
+        let current_file = fs::File::open(path)?;
+        let current_id =
+            crate::paths::windows_file_identity(&current_file).map_err(StoreError::Io)?;
+        if opened_id != current_id {
+            return Err(StoreError::StatePathChanged);
+        }
     }
     Ok(())
 }
@@ -2356,7 +2430,9 @@ fn ensure_file_identity(file: &File, path: &Path) -> Result<(), StoreError> {
 mod tests {
     use std::fs;
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
     use std::process::{Command, Stdio};
     use std::time::Instant;
@@ -2371,7 +2447,11 @@ mod tests {
             slot: 1,
             generation: 1,
             prompt,
-            cwd: Path::new("/work"),
+            cwd: if cfg!(windows) {
+                Path::new(r"C:\work")
+            } else {
+                Path::new("/work")
+            },
         }
     }
 
@@ -2410,18 +2490,21 @@ mod tests {
         let reopened = StateStore::open(&path).unwrap();
 
         assert_eq!(reopened.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert_eq!(
-            fs::metadata(temp.path().join("app"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(temp.path().join("app"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
     }
 
     #[test]
@@ -2587,11 +2670,14 @@ mod tests {
             )
             .unwrap();
 
-        let journal = sidecar_path(&path, "-journal");
-        assert_eq!(
-            fs::metadata(journal).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        #[cfg(unix)]
+        {
+            let journal = sidecar_path(&path, "-journal");
+            assert_eq!(
+                fs::metadata(journal).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         transaction.rollback().unwrap();
     }
 
@@ -2608,6 +2694,57 @@ mod tests {
             ensure_file_identity(&guard, &path),
             Err(StoreError::StatePathChanged)
         ));
+    }
+
+    #[test]
+    fn harness_completion_is_atomic_idempotent_and_does_not_touch_codex_cursor() {
+        let temp = tempdir().unwrap();
+        let mut store = StateStore::open(&temp.path().join("state.sqlite3")).unwrap();
+        let task = "00000000-0000-4000-8000-000000000001";
+        store.set_binding(1, None, task).unwrap();
+        store
+            .enqueue(&NewJob {
+                request_id: "harness-one",
+                task_id: task,
+                slot: 1,
+                generation: 1,
+                prompt: "a request",
+                cwd: temp.path(),
+            })
+            .unwrap();
+        let job = store.claim_next_runnable().unwrap().unwrap();
+        let mut stale = job.clone();
+        stale.claim_generation += 1;
+        assert!(!store.complete_harness_job(&stale, "real reply").unwrap());
+        assert!(store.complete_harness_job(&job, "real reply").unwrap());
+        assert!(!store.complete_harness_job(&job, "duplicate").unwrap());
+        assert_eq!(store.completion_count(task).unwrap(), 1);
+        assert_eq!(store.pending_count(task).unwrap(), 0);
+        assert!(store.rollout_cursor(task).unwrap().is_none());
+    }
+
+    #[test]
+    fn harness_empty_reply_and_changed_binding_never_publish_a_completion() {
+        let temp = tempdir().unwrap();
+        let mut store = StateStore::open(&temp.path().join("state.sqlite3")).unwrap();
+        let task = "00000000-0000-4000-8000-000000000001";
+        store.set_binding(1, None, task).unwrap();
+        store
+            .enqueue(&NewJob {
+                request_id: "harness-two",
+                task_id: task,
+                slot: 1,
+                generation: 1,
+                prompt: "a request",
+                cwd: temp.path(),
+            })
+            .unwrap();
+        let job = store.claim_next_runnable().unwrap().unwrap();
+        assert!(store.complete_harness_job(&job, " ").is_err());
+        assert_eq!(store.pending_count(task).unwrap(), 1);
+        store.clear_binding(1).unwrap();
+        assert!(store.complete_harness_job(&job, "real reply").unwrap());
+        assert_eq!(store.completion_count(task).unwrap(), 0);
     }
 
     #[test]
@@ -2898,6 +3035,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn summary_claim_sigkill_boundaries_preserve_pending_and_recover_generation() {
         const TASK: &str = "019fa972-5cfa-75e1-9008-0b17ade9a347";
         const TURN: &str = "019fa972-5cfa-75e1-9008-0b17ade9a348";
@@ -2971,6 +3109,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn one_hundred_sigkill_cycles_preserve_sqlite_commit_boundaries_and_fifo() {
         let stages = [
             "enqueue_before_commit",

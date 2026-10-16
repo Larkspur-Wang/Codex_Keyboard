@@ -4,6 +4,7 @@ import {
   presentProbe,
   presentSlotStatus,
   sortedTasks,
+  presentLanStatus,
 } from "../ui/view-model.js";
 
 describe("desktop Host health view", () => {
@@ -44,6 +45,29 @@ describe("desktop Host health view", () => {
 });
 
 describe("desktop four-slot dashboard", () => {
+  it("distinguishes a configured provider from an authenticated keyboard", () => {
+    const lan = {
+      listening_port: 17333,
+      received_datagrams: 10,
+      authenticated_heartbeats: 1,
+      last_heartbeat_age_ms: 20,
+    };
+    expect(presentLanStatus(lan)).toContain("已认证连接");
+    expect(presentLanStatus({ ...lan, last_heartbeat_age_ms: 5001 })).toContain(
+      "中断",
+    );
+    expect(presentLanStatus({ ...lan, last_heartbeat_age_ms: null })).toContain(
+      "尚无认证心跳",
+    );
+    expect(
+      presentLanStatus({
+        ...lan,
+        received_datagrams: 0,
+        last_heartbeat_age_ms: null,
+      }),
+    ).toContain("等待键盘连接");
+    expect(presentLanStatus(undefined)).toContain("版本较旧");
+  });
   it("clears stale provider details and distinguishes protocol failures", () => {
     expect(presentDashboardFailure("protocol_error")).toEqual({
       taskCount: "状态不可用",

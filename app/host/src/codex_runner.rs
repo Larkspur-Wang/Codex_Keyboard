@@ -1,13 +1,37 @@
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(target_os = "macos")]
 use std::os::fd::FromRawFd;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+#[cfg(unix)]
+type ControlStream = UnixStream;
+
+#[cfg(not(unix))]
+#[derive(Debug)]
+pub struct ControlStream;
+
+#[cfg(not(unix))]
+impl Read for ControlStream {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        Ok(0)
+    }
+}
+
+#[cfg(not(unix))]
+impl ControlStream {
+    fn set_nonblocking(&self, _nonblocking: bool) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -50,7 +74,23 @@ pub(crate) fn discover_codex_executable() -> PathBuf {
             return configured;
         }
     }
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    #[cfg(windows)]
+    {
+        for candidate in ["codex.cmd", "codex.exe", "codex.bat", "codex"] {
+            if let Some(path) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&path) {
+                    let full = dir.join(candidate);
+                    if full.is_file() {
+                        return full;
+                    }
+                }
+            }
+        }
+    }
+    let Some(home) = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    else {
         return PathBuf::from("codex");
     };
     let node_versions = home.join(".nvm/versions/node");
@@ -85,14 +125,55 @@ pub(crate) fn discover_codex_executable() -> PathBuf {
     candidates.pop().unwrap_or_else(|| PathBuf::from("codex"))
 }
 
+fn find_dsh_executable() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("DSH_BIN") {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let default_win =
+        PathBuf::from(r"D:\software\deepseek_harness\resources\runtime\cli\bin\dsh.cmd");
+    if default_win.exists() {
+        return Some(default_win);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("dsh.cmd");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            let candidate_sh = dir.join("dsh");
+            if candidate_sh.is_file() {
+                return Some(candidate_sh);
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct CodexRunner {
     config: CodexRunnerConfig,
+    harness: Option<PathBuf>,
 }
 
 impl CodexRunner {
+    pub(crate) fn uses_harness(&self) -> bool {
+        self.harness.is_some()
+    }
     pub fn new(config: CodexRunnerConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            harness: None,
+        }
+    }
+
+    pub(crate) fn local_host(config: CodexRunnerConfig) -> Self {
+        Self {
+            config,
+            harness: find_dsh_executable(),
+        }
     }
 
     pub fn run(&self, job: &Job) -> Result<(), JobFailureKind> {
@@ -100,19 +181,57 @@ impl CodexRunner {
     }
 
     pub fn run_with_cancel(&self, job: &Job, cancel: &AtomicBool) -> Result<(), JobFailureKind> {
-        let cwd = open_owned_directory_chain(&job.cwd, false)
-            .map_err(|_| JobFailureKind::UnsafeWorkingDirectory)?;
-        let cwd_fd = cwd.as_raw_fd();
+        self.run_with_cancel_output(job, cancel).map(|_| ())
+    }
+
+    pub(crate) fn run_with_cancel_output(
+        &self,
+        job: &Job,
+        cancel: &AtomicBool,
+    ) -> Result<Option<String>, JobFailureKind> {
+        if let Some(dsh) = &self.harness {
+            let _cwd = open_owned_directory_chain(&job.cwd, false)
+                .map_err(|_| JobFailureKind::UnsafeWorkingDirectory)?;
+            eprintln!("deepseek_harness=started slot={}", job.slot);
+            return crate::harness_runner::run(
+                &dsh,
+                &job.cwd,
+                &job.prompt,
+                cancel,
+                self.config.timeout,
+            )
+            .map(Some);
+        }
+        self.run_codex_with_cancel(job, cancel).map(|_| None)
+    }
+
+    fn run_codex_with_cancel(&self, job: &Job, cancel: &AtomicBool) -> Result<(), JobFailureKind> {
+        let _cwd = open_owned_directory_chain(&job.cwd, true).map_err(|err| {
+            eprintln!("codex_runner: cwd check failed: {:?}", err.kind());
+            JobFailureKind::UnsafeWorkingDirectory
+        })?;
+
+        #[cfg(unix)]
+        let cwd_fd = _cwd.as_raw_fd();
         let supervise = cfg!(target_os = "macos") && self.config.supervisor_executable.is_some();
-        let (mut parent_control, child_control) = if supervise {
-            let (parent, child) = UnixStream::pair().map_err(|_| JobFailureKind::ProcessIo)?;
-            (Some(parent), Some(child))
-        } else {
-            (None, None)
-        };
+        let (mut parent_control, child_control): (Option<ControlStream>, Option<ControlStream>) =
+            if supervise {
+                #[cfg(unix)]
+                {
+                    let (parent, child) =
+                        UnixStream::pair().map_err(|_| JobFailureKind::ProcessIo)?;
+                    (Some(parent), Some(child))
+                }
+                #[cfg(not(unix))]
+                (None, None)
+            } else {
+                (None, None)
+            };
+        #[cfg(unix)]
         let control_fd = child_control.as_ref().map(AsRawFd::as_raw_fd);
         let mut command = if supervise {
             let mut command = Command::new(self.config.supervisor_executable.as_ref().unwrap());
+            #[cfg(unix)]
             command.args([
                 "runner-supervisor",
                 &std::process::id().to_string(),
@@ -130,6 +249,7 @@ impl CodexRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(unix)]
         unsafe {
             command.pre_exec(move || {
                 if libc::fchdir(cwd_fd) != 0 {
@@ -155,6 +275,10 @@ impl CodexRunner {
                 Ok(())
             });
         }
+        #[cfg(not(unix))]
+        {
+            command.current_dir(&job.cwd);
+        }
         let child = command.spawn().map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 JobFailureKind::CliMissing
@@ -174,7 +298,7 @@ impl CodexRunner {
     fn drive_child(
         &self,
         mut child: Child,
-        mut control: Option<UnixStream>,
+        mut control: Option<ControlStream>,
         prompt: &[u8],
         cancel: &AtomicBool,
     ) -> Result<(), JobFailureKind> {
@@ -519,6 +643,7 @@ impl ChildGuard {
 
     fn kill_and_wait(&mut self) {
         if let Some(mut child) = self.child.take() {
+            #[cfg(unix)]
             unsafe {
                 libc::kill(-self.process_group, libc::SIGKILL);
             }
@@ -528,6 +653,7 @@ impl ChildGuard {
     }
 
     fn disarm(&mut self) {
+        #[cfg(unix)]
         unsafe {
             libc::kill(-self.process_group, libc::SIGKILL);
         }
@@ -541,7 +667,7 @@ impl Drop for ChildGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;

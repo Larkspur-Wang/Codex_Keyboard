@@ -1,11 +1,16 @@
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::mem;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -17,31 +22,60 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 use crate::audio::{inspect_eiad, inspect_eiad_signal, transcode_eiad_for_device};
 use crate::bindings::BindingService;
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 use crate::cache::{CacheId, CacheStore};
 use crate::codex_catalog::{CatalogError, CodexTaskCatalog};
 use crate::codex_runner::{CodexRunner, CodexRunnerConfig};
 use crate::dashscope::{ASR_MODEL, TTS_MODEL};
 use crate::lan_playback::MailboxStatus;
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 use crate::lan_playback::{PLAYBACK_CHUNK_BYTES, PlaybackBegin, PlaybackIdentity};
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 use crate::lan_voice::{LanPlaybackEvent, LanPlaybackRequest};
 use crate::lan_voice::{LanVoiceConfig, LanVoiceError, LanVoiceIngress};
 use crate::paths::{AppPaths, open_owned_directory_chain};
 use crate::prompt_queue::{DurablePromptScheduler, PromptQueueService};
 use crate::rollout_observer::{ObserverError, RolloutObserver};
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 use crate::secrets::{DashScopeEnvStore, ImportLock, KeychainAccounts, dashscope_key_is_installed};
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 use crate::store::SummaryPlaybackLease;
 use crate::store::{StateStore, StoreError};
 use crate::summary_orchestrator::SUMMARY_TTS_VOICE;
 
 pub const HEALTH_PROTOCOL_VERSION: u8 = 1;
+
+#[cfg(test)]
+mod startup_binding_tests {
+    use super::*;
+
+    #[test]
+    fn host_startup_preserves_all_four_bindings_without_auto_selecting_tasks() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(temp.path().join("state"));
+        paths.prepare().unwrap();
+        let task = "00000000-0000-4000-8000-000000000001";
+        {
+            let mut store = StateStore::open(&paths.state_database).unwrap();
+            for slot in 1..=4 {
+                store.set_binding(slot, None, task).unwrap();
+            }
+        }
+        drop(HostDaemon::open(&paths).unwrap());
+        let store = StateStore::open(&paths.state_database).unwrap();
+        for slot in 1..=4 {
+            assert_eq!(store.binding(slot).unwrap().unwrap().task_id, task);
+        }
+        drop(store);
+        let unbound = AppPaths::from_root(temp.path().join("unbound"));
+        drop(HostDaemon::open(&unbound).unwrap());
+        let store = StateStore::open(&unbound.state_database).unwrap();
+        assert!(store.bindings().unwrap().is_empty());
+    }
+}
 pub const HEALTH_SOCKET_NAME: &str = "host.sock";
 const MAX_REQUEST_BYTES: usize = 4 * 1024;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
@@ -164,6 +198,8 @@ pub struct DashboardSnapshot {
     pub tasks: Vec<DashboardTask>,
     pub slots: Vec<DashboardSlot>,
     pub provider: ProviderSnapshot,
+    #[serde(default)]
+    pub lan: Option<crate::lan_voice::LanVoiceStatus>,
 }
 
 enum ControlRequest {
@@ -179,11 +215,17 @@ enum ControlRequest {
 }
 
 pub struct HostDaemon {
-    #[cfg(all(target_os = "macos", not(test)))]
+    harness: bool,
     paths: AppPaths,
     socket_path: PathBuf,
+    #[cfg(unix)]
     listener: UnixListener,
+    #[cfg(unix)]
     socket_identity: (u64, u64),
+    #[cfg(not(unix))]
+    listener: std::net::TcpListener,
+    #[cfg(not(unix))]
+    socket_identity: u16,
     snapshot: Arc<HealthSnapshot>,
     scheduler: DurablePromptScheduler,
     catalog: CodexTaskCatalog,
@@ -195,7 +237,7 @@ pub struct HostDaemon {
 impl HostDaemon {
     pub fn open(paths: &AppPaths) -> Result<Self, HealthError> {
         paths.prepare()?;
-        let store = StateStore::open(&paths.state_database)?;
+        let mut store = StateStore::open(&paths.state_database)?;
         let database_schema = store.schema_version()?;
         let recovered_jobs_on_start = store.recovered_jobs_on_open();
         let observer = RolloutObserver::from_environment()?;
@@ -208,7 +250,15 @@ impl HostDaemon {
         };
         let lan_voice = LanVoiceIngress::start(lan_voice_config)?;
         let socket_path = paths.runtime_directory.join(HEALTH_SOCKET_NAME);
+        #[cfg(unix)]
         let (listener, socket_identity) = bind_private_socket(&socket_path)?;
+        #[cfg(not(unix))]
+        let (listener, socket_identity) = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let port = listener.local_addr()?.port();
+            fs::write(&socket_path, format!("{port}\n"))?;
+            (listener, port)
+        };
         let started_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -225,14 +275,15 @@ impl HostDaemon {
             database_schema,
             recovered_jobs_on_start,
         });
+        let runner = CodexRunner::local_host(CodexRunnerConfig::default());
         Ok(Self {
-            #[cfg(all(target_os = "macos", not(test)))]
+            harness: runner.uses_harness(),
             paths: paths.clone(),
             socket_path,
             listener,
             socket_identity,
             snapshot,
-            scheduler: DurablePromptScheduler::new(CodexRunner::new(CodexRunnerConfig::default())),
+            scheduler: DurablePromptScheduler::new(runner),
             catalog,
             lan_voice,
             observer: Some(observer),
@@ -256,15 +307,20 @@ impl HostDaemon {
         let observer_shutdown = Arc::clone(&shutdown);
         let running_tasks = Arc::new(AtomicU8::new(0));
         let observer_running_tasks = Arc::clone(&running_tasks);
+        let use_harness = self.harness;
         let observer_worker = thread::spawn(move || -> Result<(), StoreError> {
             while !observer_shutdown.load(Ordering::Acquire) {
-                let tick = observer.tick_due_worker(&mut observer_store)?;
+                let tick = if use_harness {
+                    crate::rollout_observer::ObserverTick::default()
+                } else {
+                    observer.tick_due_worker(&mut observer_store)?
+                };
                 observer_running_tasks.store(tick.running_tasks, Ordering::Release);
                 thread::sleep(Duration::from_millis(20));
             }
             Ok(())
         });
-        #[cfg(all(target_os = "macos", not(test)))]
+        #[cfg(not(test))]
         let (summary_worker, shared_cache) = {
             let paths = self.paths.clone();
             let summary_store = self.store.open_worker_store()?;
@@ -278,7 +334,7 @@ impl HostDaemon {
             });
             (worker, cache)
         };
-        #[cfg(all(target_os = "macos", not(test)))]
+        #[cfg(not(test))]
         let mut active_playbacks = BTreeMap::<u64, ActiveHostPlayback>::new();
         let mut last_mailbox_status = None;
         let mut next_mailbox_refresh = Instant::now();
@@ -289,7 +345,7 @@ impl HostDaemon {
                 observer_stopped_unexpectedly = true;
                 break;
             }
-            #[cfg(all(target_os = "macos", not(test)))]
+            #[cfg(not(test))]
             if summary_worker.is_finished() {
                 result = Err(io::Error::other("summary worker stopped unexpectedly").into());
                 break;
@@ -304,7 +360,21 @@ impl HostDaemon {
                 };
                 let current = MailboxStatus {
                     unread_slots: snapshot.unread_slots,
-                    running_tasks: running_tasks.load(Ordering::Acquire),
+                    running_tasks: if self.harness {
+                        let bound = self
+                            .store
+                            .bindings()?
+                            .into_iter()
+                            .map(|binding| binding.task_id)
+                            .collect::<std::collections::BTreeSet<_>>();
+                        self.scheduler
+                            .running_tasks()
+                            .intersection(&bound)
+                            .count()
+                            .min(4) as u8
+                    } else {
+                        running_tasks.load(Ordering::Acquire)
+                    },
                     coverage_by_slot: snapshot.coverage_by_slot,
                 };
                 if last_mailbox_status != Some(current) {
@@ -335,7 +405,7 @@ impl HostDaemon {
                     eprintln!("lan_voice_enqueued slot={}", prompt.slot);
                 }
             }
-            #[cfg(all(target_os = "macos", not(test)))]
+            #[cfg(not(test))]
             for _ in 0..8 {
                 let Some(event) = self.lan_voice.try_recv_playback() else {
                     break;
@@ -362,8 +432,8 @@ impl HostDaemon {
                     command,
                     &mut self.store,
                     &self.catalog,
-                    #[cfg(all(target_os = "macos", not(test)))]
                     &self.paths,
+                    &self.lan_voice,
                 );
             }
             match self.listener.accept() {
@@ -411,11 +481,14 @@ impl HostDaemon {
 
 impl Drop for HostDaemon {
     fn drop(&mut self) {
+        #[cfg(unix)]
         let _ = remove_socket_if_identity(&self.socket_path, self.socket_identity, || {});
+        #[cfg(not(unix))]
+        let _ = fs::remove_file(&self.socket_path);
     }
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 struct ActiveHostPlayback {
     lease: SummaryPlaybackLease,
     identity: PlaybackIdentity,
@@ -423,7 +496,7 @@ struct ActiveHostPlayback {
     heard_committed: bool,
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 fn handle_lan_playback_event(
     event: LanPlaybackEvent,
     store: &mut StateStore,
@@ -494,7 +567,7 @@ fn handle_lan_playback_event(
     }
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 fn begin_lan_playback(
     request: LanPlaybackRequest,
     store: &mut StateStore,
@@ -638,16 +711,12 @@ fn process_control_request(
     request: ControlRequest,
     store: &mut StateStore,
     catalog: &CodexTaskCatalog,
-    #[cfg(all(target_os = "macos", not(test)))] paths: &AppPaths,
+    paths: &AppPaths,
+    lan_voice: &LanVoiceIngress,
 ) {
     match request {
         ControlRequest::Dashboard { reply } => {
-            let _ = reply.send(build_dashboard(
-                store,
-                catalog,
-                #[cfg(all(target_os = "macos", not(test)))]
-                paths,
-            ));
+            let _ = reply.send(build_dashboard(store, catalog, paths, lan_voice.status()));
         }
         ControlRequest::BindSlot {
             slot,
@@ -659,14 +728,7 @@ fn process_control_request(
                 .bind(store, slot, expected_generation, &task_id)
                 .map_err(|_| "binding_failed")
                 .and_then(|binding| binding.ok_or("stale_binding"))
-                .and_then(|_| {
-                    build_dashboard(
-                        store,
-                        catalog,
-                        #[cfg(all(target_os = "macos", not(test)))]
-                        paths,
-                    )
-                });
+                .and_then(|_| build_dashboard(store, catalog, paths, lan_voice.status()));
             let _ = reply.send(result);
         }
     }
@@ -675,7 +737,8 @@ fn process_control_request(
 fn build_dashboard(
     store: &StateStore,
     catalog: &CodexTaskCatalog,
-    #[cfg(all(target_os = "macos", not(test)))] paths: &AppPaths,
+    paths: &AppPaths,
+    lan: crate::lan_voice::LanVoiceStatus,
 ) -> Result<DashboardSnapshot, &'static str> {
     let tasks = catalog.list_tasks().map_err(|_| "catalog_failed")?;
     let task_lookup = tasks
@@ -723,14 +786,12 @@ fn build_dashboard(
         })
         .collect();
     Ok(DashboardSnapshot {
+        lan: Some(lan),
         v: HEALTH_PROTOCOL_VERSION,
         tasks,
         slots,
         provider: ProviderSnapshot {
-            configured: dashscope_ready(
-                #[cfg(all(target_os = "macos", not(test)))]
-                paths,
-            ),
+            configured: dashscope_ready(paths),
             region: "cn-beijing".to_owned(),
             asr_model: ASR_MODEL.to_owned(),
             tts_model: TTS_MODEL.to_owned(),
@@ -739,7 +800,7 @@ fn build_dashboard(
     })
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 fn dashscope_ready(paths: &AppPaths) -> bool {
     let Ok(import_lock) = ImportLock::acquire(&paths.runtime_directory.join("key-import.lock"))
     else {
@@ -753,16 +814,26 @@ fn dashscope_ready(paths: &AppPaths) -> bool {
     dashscope_key_is_installed(&environment, &accounts).unwrap_or(false)
 }
 
-#[cfg(any(not(target_os = "macos"), test))]
-fn dashscope_ready() -> bool {
+#[cfg(test)]
+fn dashscope_ready(_paths: &AppPaths) -> bool {
     false
 }
 
+#[cfg(unix)]
+type HealthStream = UnixStream;
+#[cfg(not(unix))]
+type HealthStream = std::net::TcpStream;
+
 fn handle_client(
-    mut stream: UnixStream,
+    mut stream: HealthStream,
     snapshot: &HealthSnapshot,
     control: &mpsc::SyncSender<ControlRequest>,
 ) -> Result<(), HealthError> {
+    #[cfg(not(unix))]
+    {
+        stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(CLIENT_IO_TIMEOUT))?;
+    }
     let deadline = Instant::now() + CLIENT_IO_TIMEOUT;
     let request_bytes = read_bounded(&mut stream, MAX_REQUEST_BYTES, LimitKind::Request, deadline)?;
     let request = serde_json::from_slice::<HostRequest>(&request_bytes);
@@ -807,7 +878,7 @@ fn handle_client(
 }
 
 fn forward_control(
-    stream: &mut UnixStream,
+    stream: &mut HealthStream,
     control: &mpsc::SyncSender<ControlRequest>,
     request: impl FnOnce(mpsc::SyncSender<Result<DashboardSnapshot, &'static str>>) -> ControlRequest,
     deadline: Instant,
@@ -824,8 +895,12 @@ fn forward_control(
             deadline,
         );
     }
+    #[cfg(unix)]
+    let timeout = remaining(deadline)?;
+    #[cfg(not(unix))]
+    let timeout = deadline.saturating_duration_since(Instant::now());
     let response = reply_receiver
-        .recv_timeout(remaining(deadline)?)
+        .recv_timeout(timeout)
         .map_err(|_| HealthError::InvalidResponse)?;
     match response {
         Ok(snapshot) => write_json_line(stream, &snapshot, deadline),
@@ -894,6 +969,7 @@ pub fn bind_dashboard_slot(
     Ok(dashboard)
 }
 
+#[cfg(unix)]
 fn query_host<T: DeserializeOwned>(
     socket_path: &Path,
     request: &HostRequest,
@@ -916,6 +992,38 @@ fn query_host<T: DeserializeOwned>(
         deadline,
     )
     .map_err(|error| health_context(error, "read response"))?;
+    if let Ok(error) = serde_json::from_slice::<ErrorReplyOwned>(&response)
+        && error.v == HEALTH_PROTOCOL_VERSION
+        && !error.ok
+        && !error.error.is_empty()
+    {
+        return Err(HealthError::Rejected(error.error));
+    }
+    serde_json::from_slice(&response).map_err(|_| HealthError::InvalidResponse)
+}
+
+#[cfg(not(unix))]
+fn query_host<T: DeserializeOwned>(
+    socket_path: &Path,
+    request: &HostRequest,
+) -> Result<T, HealthError> {
+    let port_str = fs::read_to_string(socket_path)?;
+    let port: u16 = port_str
+        .trim()
+        .parse()
+        .map_err(|_| HealthError::UnsafeSocket)?;
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(CLIENT_IO_TIMEOUT))?;
+    let deadline = Instant::now() + CLIENT_IO_TIMEOUT;
+    write_json_line(&mut stream, request, deadline)?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let response = read_bounded(
+        &mut stream,
+        MAX_RESPONSE_BYTES,
+        LimitKind::Response,
+        deadline,
+    )?;
     if let Ok(error) = serde_json::from_slice::<ErrorReplyOwned>(&response)
         && error.v == HEALTH_PROTOCOL_VERSION
         && !error.ok
@@ -983,15 +1091,16 @@ fn health_context(error: HealthError, operation: &'static str) -> HealthError {
 }
 
 fn write_json_line(
-    stream: &mut UnixStream,
+    stream: &mut HealthStream,
     value: &impl Serialize,
-    deadline: Instant,
+    _deadline: Instant,
 ) -> Result<(), HealthError> {
     let mut bytes = serde_json::to_vec(value).map_err(|_| HealthError::InvalidResponse)?;
     bytes.push(b'\n');
     let mut offset = 0;
     while offset < bytes.len() {
-        stream.set_write_timeout(Some(remaining(deadline)?))?;
+        #[cfg(unix)]
+        stream.set_write_timeout(Some(remaining(_deadline)?))?;
         match stream.write(&bytes[offset..]) {
             Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero).into()),
             Ok(written) => offset += written,
@@ -1008,15 +1117,16 @@ enum LimitKind {
 }
 
 fn read_bounded(
-    stream: &mut UnixStream,
+    stream: &mut HealthStream,
     limit: usize,
     kind: LimitKind,
-    deadline: Instant,
+    _deadline: Instant,
 ) -> Result<Vec<u8>, HealthError> {
     let mut bytes = Vec::with_capacity(limit.min(1024));
     let mut chunk = [0_u8; 1024];
     loop {
-        wait_readable(stream.as_raw_fd(), deadline)?;
+        #[cfg(unix)]
+        wait_readable(stream.as_raw_fd(), _deadline)?;
         match stream.read(&mut chunk) {
             Ok(0) => return Err(HealthError::InvalidResponse),
             Ok(read) => {
@@ -1044,366 +1154,386 @@ fn read_bounded(
     }
 }
 
-fn wait_readable(descriptor: RawFd, deadline: Instant) -> Result<(), HealthError> {
-    loop {
-        let timeout = remaining(deadline)?;
-        let timeout_ms = timeout
-            .as_millis()
-            .saturating_add(u128::from(timeout.subsec_nanos() % 1_000_000 != 0))
-            .min(i32::MAX as u128) as i32;
-        let mut poll_descriptor = libc::pollfd {
-            fd: descriptor,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = unsafe { libc::poll(&mut poll_descriptor, 1, timeout_ms) };
-        if ready > 0 {
-            return Ok(());
-        }
-        if ready == 0 {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "read deadline exceeded").into());
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error.into());
-        }
-    }
-}
+#[cfg(unix)]
+use unix_socket_support::*;
 
-fn remaining(deadline: Instant) -> Result<Duration, HealthError> {
-    deadline
-        .checked_duration_since(Instant::now())
-        .filter(|remaining| *remaining >= MIN_SOCKET_TIMEOUT)
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::TimedOut, "health I/O deadline exceeded").into()
-        })
-}
+#[cfg(unix)]
+mod unix_socket_support {
+    use super::*;
 
-fn bind_private_socket(path: &Path) -> Result<(UnixListener, (u64, u64)), HealthError> {
-    bind_private_socket_with_hook(path, || {})
-}
-
-fn bind_private_socket_with_hook(
-    path: &Path,
-    before_publish: impl FnOnce(),
-) -> Result<(UnixListener, (u64, u64)), HealthError> {
-    validate_socket_path_length(path)?;
-    match fs::symlink_metadata(path) {
-        Ok(before) => {
-            validate_socket_metadata(&before)?;
-            match connect_with_deadline(path, CONNECT_TIMEOUT) {
-                Ok(_) => return Err(HealthError::AlreadyRunning),
-                Err(HealthError::Io(error))
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-                    ) => {}
-                Err(error) => return Err(error),
+    pub(super) fn wait_readable(descriptor: RawFd, deadline: Instant) -> Result<(), HealthError> {
+        loop {
+            let timeout = remaining(deadline)?;
+            let timeout_ms = timeout
+                .as_millis()
+                .saturating_add(u128::from(timeout.subsec_nanos() % 1_000_000 != 0))
+                .min(i32::MAX as u128) as i32;
+            let mut poll_descriptor = libc::pollfd {
+                fd: descriptor,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut poll_descriptor, 1, timeout_ms) };
+            if ready > 0 {
+                return Ok(());
             }
-            remove_socket_if_identity(path, (before.dev(), before.ino()), || {})?;
+            if ready == 0 {
+                return Err(
+                    io::Error::new(io::ErrorKind::TimedOut, "read deadline exceeded").into(),
+                );
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error.into());
+            }
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
     }
-    let parent_path = path.parent().ok_or(HealthError::UnsafeSocket)?;
-    let file_name = path.file_name().ok_or(HealthError::UnsafeSocket)?;
-    let parent = open_owned_directory_chain(parent_path, false)?;
-    let destination = CString::new(file_name.as_bytes()).map_err(|_| HealthError::UnsafeSocket)?;
-    let capacity = unsafe { mem::zeroed::<libc::sockaddr_un>() }.sun_path.len();
-    let available_name_bytes = capacity
-        .checked_sub(parent_path.as_os_str().as_bytes().len() + 2)
-        .ok_or(HealthError::SocketPathTooLong)?;
-    let random = uuid::Uuid::new_v4().simple().to_string();
-    let random_bytes = available_name_bytes.saturating_sub(2).min(random.len());
-    if random_bytes < 16 {
-        return Err(HealthError::SocketPathTooLong);
-    }
-    let temporary_name = format!(".h{}", &random[..random_bytes]);
-    let temporary =
-        CString::new(temporary_name.as_bytes()).map_err(|_| HealthError::UnsafeSocket)?;
-    let temporary_path = parent_path.join(&temporary_name);
-    validate_socket_path_length(&temporary_path)?;
 
-    let listener = UnixListener::bind(&temporary_path)?;
-    let listener_identity = socket_identity_at_with_mode(&parent, &temporary, false)?;
-    let publish = (|| {
-        chmod_socket_nofollow_at(&parent, &temporary)?;
-        if socket_identity_at(&parent, &temporary)? != listener_identity {
-            return Err(HealthError::UnsafeSocket);
+    pub(super) fn remaining(deadline: Instant) -> Result<Duration, HealthError> {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| *remaining >= MIN_SOCKET_TIMEOUT)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::TimedOut, "health I/O deadline exceeded").into()
+            })
+    }
+
+    pub(super) fn bind_private_socket(
+        path: &Path,
+    ) -> Result<(UnixListener, (u64, u64)), HealthError> {
+        bind_private_socket_with_hook(path, || {})
+    }
+
+    fn bind_private_socket_with_hook(
+        path: &Path,
+        before_publish: impl FnOnce(),
+    ) -> Result<(UnixListener, (u64, u64)), HealthError> {
+        validate_socket_path_length(path)?;
+        match fs::symlink_metadata(path) {
+            Ok(before) => {
+                validate_socket_metadata(&before)?;
+                match connect_with_deadline(path, CONNECT_TIMEOUT) {
+                    Ok(_) => return Err(HealthError::AlreadyRunning),
+                    Err(HealthError::Io(error))
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                        ) => {}
+                    Err(error) => return Err(error),
+                }
+                remove_socket_if_identity(path, (before.dev(), before.ino()), || {})?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
-        before_publish();
-        if let Err(error) = rename_noreplace(&parent, &temporary, &destination) {
-            return Err(if error.kind() == io::ErrorKind::AlreadyExists {
-                HealthError::UnsafeSocket
-            } else {
-                error.into()
-            });
+        let parent_path = path.parent().ok_or(HealthError::UnsafeSocket)?;
+        let file_name = path.file_name().ok_or(HealthError::UnsafeSocket)?;
+        let parent = open_owned_directory_chain(parent_path, false)?;
+        let destination =
+            CString::new(file_name.as_bytes()).map_err(|_| HealthError::UnsafeSocket)?;
+        let capacity = unsafe { mem::zeroed::<libc::sockaddr_un>() }.sun_path.len();
+        let available_name_bytes = capacity
+            .checked_sub(parent_path.as_os_str().as_bytes().len() + 2)
+            .ok_or(HealthError::SocketPathTooLong)?;
+        let random = uuid::Uuid::new_v4().simple().to_string();
+        let random_bytes = available_name_bytes.saturating_sub(2).min(random.len());
+        if random_bytes < 16 {
+            return Err(HealthError::SocketPathTooLong);
         }
-        if socket_identity_at(&parent, &destination)? != listener_identity {
-            return Err(HealthError::UnsafeSocket);
+        let temporary_name = format!(".h{}", &random[..random_bytes]);
+        let temporary =
+            CString::new(temporary_name.as_bytes()).map_err(|_| HealthError::UnsafeSocket)?;
+        let temporary_path = parent_path.join(&temporary_name);
+        validate_socket_path_length(&temporary_path)?;
+
+        let listener = UnixListener::bind(&temporary_path)?;
+        let listener_identity = socket_identity_at_with_mode(&parent, &temporary, false)?;
+        let publish = (|| {
+            chmod_socket_nofollow_at(&parent, &temporary)?;
+            if socket_identity_at(&parent, &temporary)? != listener_identity {
+                return Err(HealthError::UnsafeSocket);
+            }
+            before_publish();
+            if let Err(error) = rename_noreplace(&parent, &temporary, &destination) {
+                return Err(if error.kind() == io::ErrorKind::AlreadyExists {
+                    HealthError::UnsafeSocket
+                } else {
+                    error.into()
+                });
+            }
+            if socket_identity_at(&parent, &destination)? != listener_identity {
+                return Err(HealthError::UnsafeSocket);
+            }
+            parent.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = publish {
+            let _ = remove_socket_if_identity(&temporary_path, listener_identity, || {});
+            let _ = remove_socket_if_identity(path, listener_identity, || {});
+            return Err(error);
         }
-        parent.sync_all()?;
-        Ok(())
-    })();
-    if let Err(error) = publish {
-        let _ = remove_socket_if_identity(&temporary_path, listener_identity, || {});
-        let _ = remove_socket_if_identity(path, listener_identity, || {});
-        return Err(error);
+        Ok((listener, listener_identity))
     }
-    Ok((listener, listener_identity))
-}
 
-fn chmod_socket_nofollow_at(parent: &File, name: &CString) -> Result<(), HealthError> {
-    if unsafe {
-        libc::fchmodat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            0o600,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    } != 0
-    {
-        return Err(io::Error::last_os_error().into());
-    }
-    Ok(())
-}
-
-fn remove_socket_if_identity(
-    path: &Path,
-    expected: (u64, u64),
-    before_rename: impl FnOnce(),
-) -> Result<(), HealthError> {
-    let parent_path = path.parent().ok_or(HealthError::UnsafeSocket)?;
-    let file_name = path.file_name().ok_or(HealthError::UnsafeSocket)?;
-    let parent = open_owned_directory_chain(parent_path, false)?;
-    let source = CString::new(file_name.as_bytes()).map_err(|_| HealthError::UnsafeSocket)?;
-    let retired_name = format!(".{HEALTH_SOCKET_NAME}.{}.retired", uuid::Uuid::new_v4());
-    let retired = CString::new(retired_name).map_err(|_| HealthError::UnsafeSocket)?;
-
-    before_rename();
-    rename_noreplace(&parent, &source, &retired)?;
-
-    let moved_identity = socket_identity_at(&parent, &retired);
-    if !matches!(moved_identity, Ok(identity) if identity == expected) {
-        let _ = rename_noreplace(&parent, &retired, &source);
-        return Err(HealthError::UnsafeSocket);
-    }
-    if unsafe { libc::unlinkat(parent.as_raw_fd(), retired.as_ptr(), 0) } != 0 {
-        let error = io::Error::last_os_error();
-        let _ = rename_noreplace(&parent, &retired, &source);
-        return Err(error.into());
-    }
-    parent.sync_all()?;
-    Ok(())
-}
-
-fn socket_identity_at(parent: &File, name: &CString) -> Result<(u64, u64), HealthError> {
-    socket_identity_at_with_mode(parent, name, true)
-}
-
-fn socket_identity_at_with_mode(
-    parent: &File,
-    name: &CString,
-    require_private_mode: bool,
-) -> Result<(u64, u64), HealthError> {
-    let mut status: libc::stat = unsafe { mem::zeroed() };
-    if unsafe {
-        libc::fstatat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            &raw mut status,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    } != 0
-    {
-        return Err(io::Error::last_os_error().into());
-    }
-    socket_identity_from_status(&status, require_private_mode)
-}
-
-fn socket_identity_from_status(
-    status: &libc::stat,
-    require_private_mode: bool,
-) -> Result<(u64, u64), HealthError> {
-    let uid = unsafe { libc::geteuid() };
-    let file_type = status.st_mode & libc::S_IFMT;
-    if file_type != libc::S_IFSOCK
-        || status.st_uid != uid
-        || (require_private_mode && status.st_mode & 0o077 != 0)
-    {
-        return Err(HealthError::UnsafeSocket);
-    }
-    #[cfg(target_os = "macos")]
-    let identity = (status.st_dev as u64, status.st_ino);
-    #[cfg(target_os = "linux")]
-    let identity = (status.st_dev, status.st_ino);
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let identity = (status.st_dev as u64, status.st_ino as u64);
-    Ok(identity)
-}
-
-#[cfg(target_os = "macos")]
-fn rename_noreplace(parent: &File, source: &CString, destination: &CString) -> io::Result<()> {
-    if unsafe {
-        libc::renameatx_np(
-            parent.as_raw_fd(),
-            source.as_ptr(),
-            parent.as_raw_fd(),
-            destination.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn rename_noreplace(parent: &File, source: &CString, destination: &CString) -> io::Result<()> {
-    if unsafe {
-        libc::renameat2(
-            parent.as_raw_fd(),
-            source.as_ptr(),
-            parent.as_raw_fd(),
-            destination.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn rename_noreplace(_parent: &File, _source: &CString, _destination: &CString) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "atomic no-replace rename is unavailable",
-    ))
-}
-
-fn validate_private_socket(path: &Path) -> Result<(u64, u64), HealthError> {
-    validate_socket_path_length(path)?;
-    let metadata = fs::symlink_metadata(path)?;
-    validate_socket_metadata(&metadata)?;
-    Ok((metadata.dev(), metadata.ino()))
-}
-
-fn validate_socket_metadata(metadata: &fs::Metadata) -> Result<(), HealthError> {
-    let uid = unsafe { libc::geteuid() };
-    if !metadata.file_type().is_socket()
-        || metadata.uid() != uid
-        || metadata.permissions().mode() & 0o077 != 0
-    {
-        return Err(HealthError::UnsafeSocket);
-    }
-    Ok(())
-}
-
-fn validate_socket_path_length(path: &Path) -> Result<(), HealthError> {
-    let bytes = path.as_os_str().as_bytes();
-    let capacity = unsafe { mem::zeroed::<libc::sockaddr_un>() }.sun_path.len();
-    if bytes.is_empty() || bytes.contains(&0) || bytes.len() >= capacity {
-        return Err(HealthError::SocketPathTooLong);
-    }
-    Ok(())
-}
-
-fn connect_with_deadline(path: &Path, timeout: Duration) -> Result<UnixStream, HealthError> {
-    validate_socket_path_length(path)?;
-    let descriptor = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-    if descriptor < 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    let result = connect_descriptor(descriptor, path, timeout);
-    if result.is_err() {
-        unsafe { libc::close(descriptor) };
-    }
-    result.map(|()| unsafe { UnixStream::from_raw_fd(descriptor) })
-}
-
-fn connect_descriptor(
-    descriptor: RawFd,
-    path: &Path,
-    timeout: Duration,
-) -> Result<(), HealthError> {
-    let old_flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
-    if old_flags < 0
-        || unsafe { libc::fcntl(descriptor, libc::F_SETFL, old_flags | libc::O_NONBLOCK) } < 0
-        || unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
-    {
-        return Err(io::Error::last_os_error().into());
-    }
-    let mut address: libc::sockaddr_un = unsafe { mem::zeroed() };
-    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    let bytes = path.as_os_str().as_bytes();
-    for (target, source) in address.sun_path.iter_mut().zip(bytes) {
-        *target = *source as libc::c_char;
-    }
-    let address_length = (mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
-        .try_into()
-        .map_err(|_| HealthError::SocketPathTooLong)?;
-    #[cfg(target_os = "macos")]
-    {
-        address.sun_len =
-            u8::try_from(address_length).map_err(|_| HealthError::SocketPathTooLong)?;
-    }
-    let connected = unsafe {
-        libc::connect(
-            descriptor,
-            (&raw const address).cast::<libc::sockaddr>(),
-            address_length,
-        )
-    };
-    if connected != 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EINPROGRESS) {
-            return Err(error.into());
-        }
-        let mut poll_descriptor = libc::pollfd {
-            fd: descriptor,
-            events: libc::POLLOUT,
-            revents: 0,
-        };
-        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-        let ready = unsafe { libc::poll(&mut poll_descriptor, 1, timeout_ms) };
-        if ready == 0 {
-            return Err(
-                io::Error::new(io::ErrorKind::TimedOut, "connect deadline exceeded").into(),
-            );
-        }
-        if ready < 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        let mut socket_error = 0;
-        let mut socket_error_length = mem::size_of::<libc::c_int>() as libc::socklen_t;
+    fn chmod_socket_nofollow_at(parent: &File, name: &CString) -> Result<(), HealthError> {
         if unsafe {
-            libc::getsockopt(
-                descriptor,
-                libc::SOL_SOCKET,
-                libc::SO_ERROR,
-                (&raw mut socket_error).cast(),
-                &mut socket_error_length,
+            libc::fchmodat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                0o600,
+                libc::AT_SYMLINK_NOFOLLOW,
             )
         } != 0
         {
             return Err(io::Error::last_os_error().into());
         }
-        if socket_error != 0 {
-            return Err(io::Error::from_raw_os_error(socket_error).into());
+        Ok(())
+    }
+
+    pub(super) fn remove_socket_if_identity(
+        path: &Path,
+        expected: (u64, u64),
+        before_rename: impl FnOnce(),
+    ) -> Result<(), HealthError> {
+        let parent_path = path.parent().ok_or(HealthError::UnsafeSocket)?;
+        let file_name = path.file_name().ok_or(HealthError::UnsafeSocket)?;
+        let parent = open_owned_directory_chain(parent_path, false)?;
+        let source = CString::new(file_name.as_bytes()).map_err(|_| HealthError::UnsafeSocket)?;
+        let retired_name = format!(".{HEALTH_SOCKET_NAME}.{}.retired", uuid::Uuid::new_v4());
+        let retired = CString::new(retired_name).map_err(|_| HealthError::UnsafeSocket)?;
+
+        before_rename();
+        rename_noreplace(&parent, &source, &retired)?;
+
+        let moved_identity = socket_identity_at(&parent, &retired);
+        if !matches!(moved_identity, Ok(identity) if identity == expected) {
+            let _ = rename_noreplace(&parent, &retired, &source);
+            return Err(HealthError::UnsafeSocket);
+        }
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), retired.as_ptr(), 0) } != 0 {
+            let error = io::Error::last_os_error();
+            let _ = rename_noreplace(&parent, &retired, &source);
+            return Err(error.into());
+        }
+        parent.sync_all()?;
+        Ok(())
+    }
+
+    fn socket_identity_at(parent: &File, name: &CString) -> Result<(u64, u64), HealthError> {
+        socket_identity_at_with_mode(parent, name, true)
+    }
+
+    fn socket_identity_at_with_mode(
+        parent: &File,
+        name: &CString,
+        require_private_mode: bool,
+    ) -> Result<(u64, u64), HealthError> {
+        let mut status: libc::stat = unsafe { mem::zeroed() };
+        if unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                &raw mut status,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        socket_identity_from_status(&status, require_private_mode)
+    }
+
+    fn socket_identity_from_status(
+        status: &libc::stat,
+        require_private_mode: bool,
+    ) -> Result<(u64, u64), HealthError> {
+        let uid = unsafe { libc::geteuid() };
+        let file_type = status.st_mode & libc::S_IFMT;
+        if file_type != libc::S_IFSOCK
+            || status.st_uid != uid
+            || (require_private_mode && status.st_mode & 0o077 != 0)
+        {
+            return Err(HealthError::UnsafeSocket);
+        }
+        #[cfg(target_os = "macos")]
+        let identity = (status.st_dev as u64, status.st_ino);
+        #[cfg(target_os = "linux")]
+        let identity = (status.st_dev, status.st_ino);
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let identity = (status.st_dev as u64, status.st_ino as u64);
+        Ok(identity)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn rename_noreplace(parent: &File, source: &CString, destination: &CString) -> io::Result<()> {
+        if unsafe {
+            libc::renameatx_np(
+                parent.as_raw_fd(),
+                source.as_ptr(),
+                parent.as_raw_fd(),
+                destination.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
         }
     }
-    if unsafe { libc::fcntl(descriptor, libc::F_SETFL, old_flags) } < 0 {
-        return Err(io::Error::last_os_error().into());
+
+    #[cfg(target_os = "linux")]
+    fn rename_noreplace(parent: &File, source: &CString, destination: &CString) -> io::Result<()> {
+        if unsafe {
+            libc::renameat2(
+                parent.as_raw_fd(),
+                source.as_ptr(),
+                parent.as_raw_fd(),
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
-    Ok(())
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn rename_noreplace(
+        _parent: &File,
+        _source: &CString,
+        _destination: &CString,
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic no-replace rename is unavailable",
+        ))
+    }
+
+    pub(super) fn validate_private_socket(path: &Path) -> Result<(u64, u64), HealthError> {
+        validate_socket_path_length(path)?;
+        let metadata = fs::symlink_metadata(path)?;
+        validate_socket_metadata(&metadata)?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+
+    fn validate_socket_metadata(metadata: &fs::Metadata) -> Result<(), HealthError> {
+        let uid = unsafe { libc::geteuid() };
+        if !metadata.file_type().is_socket()
+            || metadata.uid() != uid
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(HealthError::UnsafeSocket);
+        }
+        Ok(())
+    }
+
+    fn validate_socket_path_length(path: &Path) -> Result<(), HealthError> {
+        let bytes = path.as_os_str().as_bytes();
+        let capacity = unsafe { mem::zeroed::<libc::sockaddr_un>() }.sun_path.len();
+        if bytes.is_empty() || bytes.contains(&0) || bytes.len() >= capacity {
+            return Err(HealthError::SocketPathTooLong);
+        }
+        Ok(())
+    }
+
+    pub(super) fn connect_with_deadline(
+        path: &Path,
+        timeout: Duration,
+    ) -> Result<UnixStream, HealthError> {
+        validate_socket_path_length(path)?;
+        let descriptor = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let result = connect_descriptor(descriptor, path, timeout);
+        if result.is_err() {
+            unsafe { libc::close(descriptor) };
+        }
+        result.map(|()| unsafe { UnixStream::from_raw_fd(descriptor) })
+    }
+
+    fn connect_descriptor(
+        descriptor: RawFd,
+        path: &Path,
+        timeout: Duration,
+    ) -> Result<(), HealthError> {
+        let old_flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+        if old_flags < 0
+            || unsafe { libc::fcntl(descriptor, libc::F_SETFL, old_flags | libc::O_NONBLOCK) } < 0
+            || unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        let mut address: libc::sockaddr_un = unsafe { mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = path.as_os_str().as_bytes();
+        for (target, source) in address.sun_path.iter_mut().zip(bytes) {
+            *target = *source as libc::c_char;
+        }
+        let address_length = (mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
+            .try_into()
+            .map_err(|_| HealthError::SocketPathTooLong)?;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len =
+                u8::try_from(address_length).map_err(|_| HealthError::SocketPathTooLong)?;
+        }
+        let connected = unsafe {
+            libc::connect(
+                descriptor,
+                (&raw const address).cast::<libc::sockaddr>(),
+                address_length,
+            )
+        };
+        if connected != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINPROGRESS) {
+                return Err(error.into());
+            }
+            let mut poll_descriptor = libc::pollfd {
+                fd: descriptor,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+            let ready = unsafe { libc::poll(&mut poll_descriptor, 1, timeout_ms) };
+            if ready == 0 {
+                return Err(
+                    io::Error::new(io::ErrorKind::TimedOut, "connect deadline exceeded").into(),
+                );
+            }
+            if ready < 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            let mut socket_error = 0;
+            let mut socket_error_length = mem::size_of::<libc::c_int>() as libc::socklen_t;
+            if unsafe {
+                libc::getsockopt(
+                    descriptor,
+                    libc::SOL_SOCKET,
+                    libc::SO_ERROR,
+                    (&raw mut socket_error).cast(),
+                    &mut socket_error_length,
+                )
+            } != 0
+            {
+                return Err(io::Error::last_os_error().into());
+            }
+            if socket_error != 0 {
+                return Err(io::Error::from_raw_os_error(socket_error).into());
+            }
+        }
+        if unsafe { libc::fcntl(descriptor, libc::F_SETFL, old_flags) } < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use rusqlite::{Connection, params};

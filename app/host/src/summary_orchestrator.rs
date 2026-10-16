@@ -13,6 +13,73 @@ use crate::tts_cache::{
     publish_tts_generation_with,
 };
 
+// The Windows Harness mode keeps the existing local excerpt path, but only
+// for verified replies. Preserve all previous unheard speech and structure;
+// a bounded document failure must retain the old generation.
+fn harness_reply_summary(
+    claim: &SummaryClaim,
+    previous: Option<&SummaryDocument>,
+) -> Result<SummaryDocument, SummaryDocumentError> {
+    let mut excerpts = Vec::new();
+    for completion in &claim.completions {
+        let turn: crate::rollout_observer::TurnPack =
+            serde_json::from_str(&completion.turn_pack).map_err(|_| SummaryDocumentError::Json)?;
+        let reply = turn.assistant.last().ok_or(SummaryDocumentError::Text)?;
+        let mut code = false;
+        let mut lines = Vec::new();
+        for line in reply.lines() {
+            let line = line.trim();
+            if line.starts_with("```") {
+                code = !code;
+                continue;
+            }
+            if !code && !line.is_empty() {
+                lines.push(line.trim_start_matches('#').trim());
+            }
+        }
+        let plain = lines.join(" ");
+        if plain.trim().is_empty() {
+            return Err(SummaryDocumentError::Text);
+        }
+        let excerpt: String = plain.chars().take(280).collect();
+        excerpts.push(if plain.chars().count() > 280 {
+            format!("{excerpt}。其余内容请查看任务结果。")
+        } else {
+            excerpt
+        });
+    }
+    let latest = excerpts.join(" ");
+    let mut facts = previous
+        .map(|document| document.facts.clone())
+        .unwrap_or_default();
+    if facts.len() < crate::summary::MAX_SUMMARY_ITEMS_PER_SECTION {
+        facts.push(latest.chars().take(240).collect());
+    }
+    let spoken_text = match previous {
+        Some(previous) => format!("{latest} 之前未听的内容：{}", previous.spoken_text),
+        None => latest,
+    };
+    let document = SummaryDocument {
+        schema: crate::summary::SUMMARY_SCHEMA_VERSION,
+        facts,
+        pending: previous
+            .map(|document| document.pending.clone())
+            .unwrap_or_default(),
+        decisions: previous
+            .map(|document| document.decisions.clone())
+            .unwrap_or_default(),
+        spoken_text,
+        source_evidence: Vec::new(),
+        covers_new_completions: claim
+            .completions
+            .iter()
+            .map(|completion| completion.completion_id.clone())
+            .collect(),
+    };
+    document.validate()?;
+    Ok(document)
+}
+
 pub const SUMMARY_TTS_VOICE: &str = "longanfengyue";
 pub const SUMMARY_TTS_INSTRUCTIONS: &str = "请用自然、清晰、克制的普通话女声，像熟悉工作的同事当面简洁汇报。整体语速中等，句间只做必要的短停顿；最新结果、数字、限制和待办要清楚。语气平实、有温度，不要播音腔、客服腔、广告腔、夸张情绪或撒娇；英文技术词、数字和缩写按自然语境读，不朗读标点和格式符号。";
 
@@ -212,11 +279,33 @@ where
         };
         observer.reached(SummaryCheckpoint::PreviousUnreadLoaded);
 
-        let summary = match self.generator.generate(&claim, previous.as_ref()) {
-            Ok(summary) => summary,
-            Err(error) => {
-                self.abandon(&claim)?;
-                return Err(error.into());
+        let is_harness = claim.completions.iter().all(|completion| {
+            serde_json::from_str::<serde_json::Value>(&completion.turn_pack)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("executor")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("deepseek")
+        });
+        let summary = if is_harness {
+            match harness_reply_summary(&claim, previous.as_ref()) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    self.abandon(&claim)?;
+                    return Err(error.into());
+                }
+            }
+        } else {
+            match self.generator.generate(&claim, previous.as_ref()) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    self.abandon(&claim)?;
+                    return Err(error.into());
+                }
             }
         };
         let expected = claim
@@ -368,6 +457,8 @@ enum RecoveryCommitError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -384,6 +475,37 @@ mod tests {
     const SECOND: &str = "019fa972-5cfa-75e1-9008-0b17ade9a349";
     const GENERIC_SOURCE_QUOTE: &str = "助手最终回复已经完成目标功能";
     const SOURCE_QUOTE: &str = "固件已把四个槽位映射到左起四颗灯并保持第五颗灯熄灭";
+
+    #[test]
+    fn harness_excerpt_preserves_previous_unheard_and_does_not_invent_success() {
+        let previous = SummaryDocument {
+            schema: SUMMARY_SCHEMA_VERSION,
+            facts: vec!["旧事实".into()],
+            pending: vec!["旧待办".into()],
+            decisions: vec!["旧决定".into()],
+            spoken_text: "此前尚未听过的内容".into(),
+            source_evidence: Vec::new(),
+            covers_new_completions: vec![FIRST.into()],
+        };
+        let mut claim = SummaryClaim {
+            outcome: SummaryClaimOutcome::Inserted, request_id: "harness-summary".into(), task_id: TASK.into(),
+            generation: 2, previous_unread: None,
+            completions: vec![crate::store::PendingSummaryCompletion {
+                completion_id: SECOND.into(),
+                turn_pack: serde_json::json!({"v":1,"turn_id":SECOND,"executor":"deepseek","user":[],"assistant":["无法连接目标服务，需要重试。"],"tools":[]}).to_string(),
+            }],
+        };
+        let summary = harness_reply_summary(&claim, Some(&previous)).unwrap();
+        assert!(summary.spoken_text.starts_with("无法连接"));
+        assert!(summary.spoken_text.contains(&previous.spoken_text));
+        assert_eq!(summary.pending, previous.pending);
+        assert_eq!(summary.decisions, previous.decisions);
+        assert!(summary.facts.contains(&previous.facts[0]));
+        claim.completions[0].turn_pack =
+            serde_json::json!({"v":1,"turn_id":SECOND,"user":[],"assistant":[],"tools":[]})
+                .to_string();
+        assert!(harness_reply_summary(&claim, Some(&previous)).is_err());
+    }
 
     #[test]
     fn summary_tts_instructions_request_natural_concise_delivery() {
@@ -528,7 +650,11 @@ mod tests {
         let expected = store.rollout_cursor(TASK).unwrap();
         let next = RolloutCursor {
             task_id: TASK.into(),
-            rollout_path: PathBuf::from("/tmp/easy-codex-input-m4d-fixture.jsonl"),
+            rollout_path: if cfg!(windows) {
+                PathBuf::from(r"C:\tmp\easy-codex-input-m4d-fixture.jsonl")
+            } else {
+                PathBuf::from("/tmp/easy-codex-input-m4d-fixture.jsonl")
+            },
             device: 7,
             inode: 11,
             offset: ordinal,
@@ -935,6 +1061,7 @@ mod tests {
 
     #[test]
     fn every_checkpoint_sigkill_recovers_without_losing_old_unread_or_completion_coverage() {
+        #[cfg(unix)]
         use std::os::unix::process::ExitStatusExt;
         use std::process::Command;
 
@@ -983,8 +1110,16 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             assert!(ready.exists(), "kill helper did not reach {checkpoint:?}");
-            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGKILL) }, 0);
-            assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+            #[cfg(unix)]
+            {
+                assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGKILL) }, 0);
+                assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+            }
+            #[cfg(not(unix))]
+            {
+                child.kill().unwrap();
+                let _ = child.wait();
+            }
 
             let mut reopened = StateStore::open(&state_path).unwrap();
             let cache = open_cache(&cache_path);

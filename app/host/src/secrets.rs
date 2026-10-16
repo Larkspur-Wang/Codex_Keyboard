@@ -1,5 +1,6 @@
 use std::fs::{self, File};
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -308,12 +309,17 @@ impl SecretStore for LocalCacheSecretStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(SecretStoreError::Backend),
         };
+        #[cfg(unix)]
         if !metadata.is_file()
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.nlink() != 1
             || metadata.permissions().mode() & 0o077 != 0
             || metadata.len() > 65
         {
+            return Err(SecretStoreError::Backend);
+        }
+        #[cfg(not(unix))]
+        if !metadata.is_file() || metadata.len() > 65 {
             return Err(SecretStoreError::Backend);
         }
         let mut file =
@@ -492,14 +498,12 @@ pub fn import_dashscope_key<S: SecretStore, R: SecretStore, V: CredentialVerifie
     Ok(receipt)
 }
 
-pub fn configure_dashscope_env<V: CredentialVerifier>(
-    source: &Path,
+pub fn configure_dashscope_from_candidate<V: CredentialVerifier>(
+    candidate: SecretBytes,
     target: &Path,
     verifier: &V,
-    _lock: &ImportLock,
 ) -> Result<VerificationReceipt, ImportError> {
     cleanup_dashscope_env_temporaries(target)?;
-    let candidate = load_target_secret(source)?;
     let receipt = verifier.verify(&candidate)?;
     let mut encoded = Zeroizing::new(Vec::with_capacity(
         DASHSCOPE_VARIABLE.len() + candidate.as_slice().len() + 2,
@@ -523,6 +527,49 @@ pub fn configure_dashscope_env<V: CredentialVerifier>(
     Ok(receipt)
 }
 
+pub fn configure_dashscope_env<V: CredentialVerifier>(
+    source: &Path,
+    target: &Path,
+    verifier: &V,
+    _lock: &ImportLock,
+) -> Result<VerificationReceipt, ImportError> {
+    let candidate = load_target_secret(source)?;
+    configure_dashscope_from_candidate(candidate, target, verifier)
+}
+
+pub fn load_bailian_config_secret(config_path: &Path) -> Result<SecretBytes, ImportError> {
+    let file = open_import_source(config_path, false)?;
+    let before = file.metadata().map_err(|_| ImportError::SourceIo)?;
+    if before.len() > MAX_IMPORT_BYTES {
+        return Err(ImportError::SourceTooLarge);
+    }
+    let mut buffer = Zeroizing::new(Vec::with_capacity((MAX_IMPORT_BYTES + 1) as usize));
+    (&file)
+        .take(MAX_IMPORT_BYTES + 1)
+        .read_to_end(&mut buffer)
+        .map_err(|_| ImportError::SourceIo)?;
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&buffer).map_err(|_| ImportError::InvalidTargetVariable)?;
+    let api_key = parsed
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .or_else(|| parsed.get("apiKey").and_then(|v| v.as_str()))
+        .ok_or(ImportError::InvalidTargetVariable)?;
+    let bytes = api_key.as_bytes();
+    validate_credential(bytes)?;
+    Ok(SecretBytes::new(bytes.to_vec()))
+}
+
+pub fn configure_dashscope_from_bailian<V: CredentialVerifier>(
+    config_path: &Path,
+    target: &Path,
+    verifier: &V,
+    _lock: &ImportLock,
+) -> Result<VerificationReceipt, ImportError> {
+    let candidate = load_bailian_config_secret(config_path)?;
+    configure_dashscope_from_candidate(candidate, target, verifier)
+}
+
 fn cleanup_dashscope_env_temporaries(target: &Path) -> Result<(), ImportError> {
     let parent = target.parent().ok_or(ImportError::UnsafeSource)?;
     let target_name = target
@@ -533,6 +580,7 @@ fn cleanup_dashscope_env_temporaries(target: &Path) -> Result<(), ImportError> {
     let directory = crate::paths::open_owned_directory_chain(parent, false)
         .map_err(|_| ImportError::UnsafeSource)?;
     let prefix = format!(".{target_name}.");
+    #[cfg(unix)]
     let effective_uid = unsafe { libc::geteuid() };
     let mut matched = 0_usize;
     for name in crate::paths::directory_names_at(&directory).map_err(|_| ImportError::SourceIo)? {
@@ -554,10 +602,18 @@ fn cleanup_dashscope_env_temporaries(target: &Path) -> Result<(), ImportError> {
         }
         let metadata =
             crate::paths::metadata_at(&directory, &name).map_err(|_| ImportError::SourceIo)?;
+        #[cfg(unix)]
         if metadata.st_mode & libc::S_IFMT != libc::S_IFREG
             || metadata.st_uid != effective_uid
             || metadata.st_nlink != 1
             || metadata.st_mode & 0o077 != 0
+            || metadata.st_size < 0
+            || metadata.st_size as u64 > MAX_IMPORT_BYTES
+        {
+            return Err(ImportError::UnsafeSource);
+        }
+        #[cfg(not(unix))]
+        if !metadata.is_regular
             || metadata.st_size < 0
             || metadata.st_size as u64 > MAX_IMPORT_BYTES
         {
@@ -618,11 +674,19 @@ fn load_target_secret_with_permissions(
         return Err(ImportError::SourceTooLarge);
     }
     let after = file.metadata().map_err(|_| ImportError::SourceIo)?;
+    #[cfg(unix)]
     if before.len() != after.len()
         || before.mtime() != after.mtime()
         || before.mtime_nsec() != after.mtime_nsec()
         || before.ctime() != after.ctime()
         || before.ctime_nsec() != after.ctime_nsec()
+    {
+        return Err(ImportError::UnsafeSource);
+    }
+    #[cfg(not(unix))]
+    if before.len() != after.len()
+        || before.modified().map_err(|_| ImportError::SourceIo)?
+            != after.modified().map_err(|_| ImportError::SourceIo)?
     {
         return Err(ImportError::UnsafeSource);
     }
@@ -644,14 +708,23 @@ fn open_import_source(source: &Path, require_private: bool) -> Result<File, Impo
         .map_err(|_| ImportError::UnsafeSource)?;
     let file = crate::paths::open_file_at(&directory, file_name, false)
         .map_err(|_| ImportError::UnsafeSource)?;
+    #[cfg(unix)]
     let effective_uid = unsafe { libc::geteuid() };
     let opened = file.metadata().map_err(|_| ImportError::SourceIo)?;
+    #[cfg(unix)]
     if !opened.is_file()
         || opened.uid() != effective_uid
         || opened.mode() & 0o022 != 0
         || (require_private && opened.mode() & 0o077 != 0)
     {
         return Err(ImportError::UnsafeSource);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = require_private;
+        if !opened.is_file() {
+            return Err(ImportError::UnsafeSource);
+        }
     }
     file.try_lock_shared()
         .map_err(|_| ImportError::UnsafeSource)?;
@@ -726,7 +799,7 @@ fn trim_ascii_start(value: &[u8]) -> &[u8] {
     value.trim_ascii_start()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
@@ -1510,5 +1583,44 @@ mod tests {
         assert!(dashscope_key_is_installed(&MacKeychainStore::background(), &accounts).unwrap());
         store.delete(&accounts.dashscope).unwrap();
         store.delete(&accounts.dashscope_verified).unwrap();
+    }
+
+    #[test]
+    fn bailian_config_loads_api_key_and_rejects_malformed_sources() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        fs::write(
+            &config_path,
+            serde_json::json!({"api_key": format!("sk-{}", "test".repeat(8)), "console_region": "cn-beijing"}).to_string(),
+        )
+        .unwrap();
+
+        let secret = load_bailian_config_secret(&config_path).unwrap();
+        assert_eq!(
+            secret.as_slice(),
+            format!("sk-{}", "test".repeat(8)).as_bytes()
+        );
+
+        let target_env = temp.path().join(".env");
+        let receipt = configure_dashscope_from_bailian(
+            &config_path,
+            &target_env,
+            &Verifier(Ok(receipt())),
+            &lock(&temp),
+        )
+        .unwrap();
+        assert_eq!(receipt.region, "cn-beijing");
+        let readback = load_private_target_secret(&target_env).unwrap();
+        assert_eq!(
+            readback.as_slice(),
+            format!("sk-{}", "test".repeat(8)).as_bytes()
+        );
+
+        let invalid_path = temp.path().join("invalid.json");
+        fs::write(&invalid_path, r#"{"other_field": 123}"#).unwrap();
+        assert!(matches!(
+            load_bailian_config_secret(&invalid_path),
+            Err(ImportError::InvalidTargetVariable)
+        ));
     }
 }

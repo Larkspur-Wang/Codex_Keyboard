@@ -5,14 +5,14 @@
 
 ## 产品边界
 
-- 本仓只做同一局域网内的 `Keyboard <-> Mac Host` 产品。
+- 本仓只做同一局域网内的 `Keyboard <-> 本地 Host（Mac/Windows）` 产品。
 - 不实现手机 PWA、Cloudflare、Relay、远程 WSS、热点代理或公网访问。
 - 上排 `S1-S4` 是槽位 1-4 的 PTT；下排 `S5-S8` 是槽位 1-4 的未读总结播放。
 - 旋钮旋转固定为板载扬声器音量：物理逆时针减小、顺时针增大，不向 Mac 发送系统音量键；
   短按旋钮立即播放固件内预置的当前音量播报，长按 3 秒仍进入配置模式。
 - 固件不保存 Codex task UUID；`slot -> task` 的唯一真相源是 Mac Host SQLite。
 - Tauri App 是本地 Host 的管理界面，不拥有第二份状态。
-- 总结固定由 Host 隔离调用 `gpt-5.6-luna`，reasoning effort 为 `high`；TTS 固定调用北京区
+- Codex 模式总结固定由 Host 隔离调用 `gpt-5.6-luna`，reasoning effort 为 `high`；TTS 固定调用北京区
   `qwen-audio-3.0-tts-flash`，音色 `longanfengyue`，完整 `spoken_text` 每代只提交一次；ASR
   默认 `qwen3-asr-flash`。
 - 左起第 1-4 颗灯只表示槽 1-4 的未听信箱；最右第 5 颗灯只表示不同已绑定任务的运行数，
@@ -22,6 +22,8 @@
 
 - 同一 Codex task 严格 FIFO，prompt 只能经 stdin 传给 `codex exec resume`。
 - 只有 Codex rollout 权威 `task_complete` 才能触发总结。
+- 2026-10-16 用户明确保留 Windows DeepSeek Harness 执行器：其 prompt 同样只经 stdin；只有真实 final 加成功退出才能由 Host 私有完成事务触发总结，不得写入或伪造 Codex rollout，失败不得回退为假完成。
+- 此模式沿用 Windows 本地回复摘录播报，必须来自真实最终回复并累计保留旧未听文本，不能编造“已完成”；Codex 模式仍使用固定 Luna 总结。实际运行灯以所选引擎的 Host 生命周期为准。
 - 未听总结必须滚入下一次总结；新 generation 完整发布后才能替换旧 generation。
 - 只有固件实际播放完毕并回传匹配 generation，Host 才能标记 heard 和删除缓存。
 - PTT 永远优先于播放；取消、断线、超时和失败不能消费未读总结。

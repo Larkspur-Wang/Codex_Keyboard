@@ -2,8 +2,34 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+
+pub(crate) trait FileReadAt {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
+}
+
+impl FileReadAt for File {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            FileExt::read_at(self, buf, offset)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileExt;
+            FileExt::seek_read(self, buf, offset)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let mut file = self.try_clone()?;
+            file.seek(SeekFrom::Start(offset))?;
+            std::io::Read::read(&mut file, buf)
+        }
+    }
+}
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -176,8 +202,6 @@ impl PendingScan {
 
 impl CompletionVerification {
     fn advance(&mut self, rollout: &GuardedRollout, budget: usize) -> Result<usize, ObserverError> {
-        use std::os::unix::fs::FileExt;
-
         if self.offset < self.start_offset || self.offset > self.end_offset {
             return Err(ObserverError::InvalidRollout);
         }
@@ -802,14 +826,46 @@ impl GuardedRollout {
             .map_err(|_| ObserverError::UnsafePath)?;
         let file = open_file_at(&parent, &name, false).map_err(|_| ObserverError::UnsafePath)?;
         let metadata = file.metadata()?;
+        #[cfg(unix)]
         if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
             return Err(ObserverError::UnsafePath);
         }
+        #[cfg(not(unix))]
+        if !metadata.is_file() {
+            return Err(ObserverError::UnsafePath);
+        }
+        #[cfg(unix)]
+        let (device, inode) = (metadata.dev(), metadata.ino());
+        #[cfg(windows)]
+        let (device, inode) = {
+            use std::os::windows::io::AsRawHandle;
+            let handle = file.as_raw_handle();
+            let mut info = std::mem::MaybeUninit::<
+                windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION,
+            >::uninit();
+            let success = unsafe {
+                windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle(
+                    handle as _,
+                    info.as_mut_ptr(),
+                )
+            };
+            if success != 0 {
+                let info = unsafe { info.assume_init() };
+                (
+                    info.dwVolumeSerialNumber as u64,
+                    ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64),
+                )
+            } else {
+                (0, 0)
+            }
+        };
+        #[cfg(not(any(unix, windows)))]
+        let (device, inode) = (0, 0);
         Ok(Self {
             parent,
             name,
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            device,
+            inode,
             size: metadata.len(),
             file,
         })
@@ -819,11 +875,40 @@ impl GuardedRollout {
         let current =
             open_file_at(&self.parent, &self.name, false).map_err(|_| ObserverError::UnsafePath)?;
         let metadata = current.metadata()?;
+        #[cfg(unix)]
         if !metadata.is_file()
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.dev() != self.device
             || metadata.ino() != self.inode
         {
+            return Err(ObserverError::UnsafePath);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            if !metadata.is_file() {
+                return Err(ObserverError::UnsafePath);
+            }
+            let handle = current.as_raw_handle();
+            let mut info = std::mem::MaybeUninit::<
+                windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION,
+            >::uninit();
+            let success = unsafe {
+                windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle(
+                    handle as _,
+                    info.as_mut_ptr(),
+                )
+            };
+            if success != 0 {
+                let info = unsafe { info.assume_init() };
+                let file_index = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+                if (info.dwVolumeSerialNumber as u64) != self.device || file_index != self.inode {
+                    return Err(ObserverError::UnsafePath);
+                }
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        if !metadata.is_file() {
             return Err(ObserverError::UnsafePath);
         }
         Ok(())
@@ -832,9 +917,33 @@ impl GuardedRollout {
     fn validate_session_meta(&self, task_id: &str) -> Result<(), ObserverError> {
         let file =
             open_file_at(&self.parent, &self.name, false).map_err(|_| ObserverError::UnsafePath)?;
-        let metadata = file.metadata()?;
-        if metadata.dev() != self.device || metadata.ino() != self.inode {
-            return Err(ObserverError::UnsafePath);
+        #[cfg(unix)]
+        {
+            let metadata = file.metadata()?;
+            if metadata.dev() != self.device || metadata.ino() != self.inode {
+                return Err(ObserverError::UnsafePath);
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            let handle = file.as_raw_handle();
+            let mut info = std::mem::MaybeUninit::<
+                windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION,
+            >::uninit();
+            let success = unsafe {
+                windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle(
+                    handle as _,
+                    info.as_mut_ptr(),
+                )
+            };
+            if success != 0 {
+                let info = unsafe { info.assume_init() };
+                let file_index = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+                if (info.dwVolumeSerialNumber as u64) != self.device || file_index != self.inode {
+                    return Err(ObserverError::UnsafePath);
+                }
+            }
         }
         let mut reader = BufReader::new(file);
         let mut line = Vec::new();
@@ -864,7 +973,6 @@ impl GuardedRollout {
         if offset == 0 {
             return Ok(());
         }
-        use std::os::unix::fs::FileExt;
 
         let mut byte = [0_u8; 1];
         if self.file.read_at(&mut byte, offset - 1)? != 1 || byte[0] != b'\n' {
@@ -874,8 +982,6 @@ impl GuardedRollout {
     }
 
     fn anchor_at(&self, offset: u64) -> Result<[u8; 32], ObserverError> {
-        use std::os::unix::fs::FileExt;
-
         let metadata = self.file.metadata()?;
         if offset > metadata.len() {
             return Err(ObserverError::InvalidRollout);
@@ -894,8 +1000,6 @@ impl GuardedRollout {
     }
 
     fn hash_range(&self, offset: u64, length: usize) -> Result<[u8; 32], ObserverError> {
-        use std::os::unix::fs::FileExt;
-
         let end = offset
             .checked_add(length as u64)
             .ok_or(ObserverError::RolloutTooLarge)?;
@@ -2216,7 +2320,7 @@ fn looks_like_secret_token(token: &str) -> bool {
     known_prefix || jwt || high_entropy
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs::{self, OpenOptions};
     use std::io::Write;

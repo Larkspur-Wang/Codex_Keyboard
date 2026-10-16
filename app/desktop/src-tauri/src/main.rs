@@ -1,14 +1,16 @@
-#[cfg(target_os = "macos")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use easy_codex_host::health::{
     DashboardSnapshot, HEALTH_SOCKET_NAME, HealthError, HealthSnapshot, bind_dashboard_slot,
     query_dashboard, query_health,
 };
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use easy_codex_host::paths::AppPaths;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use serde::Serialize;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[derive(Debug, Serialize)]
 #[serde(tag = "connection", rename_all = "snake_case")]
 enum HostProbe {
@@ -17,7 +19,7 @@ enum HostProbe {
     ProtocolError { reason: &'static str },
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[derive(Debug, Serialize)]
 #[serde(tag = "connection", rename_all = "snake_case")]
 enum DashboardProbe {
@@ -26,12 +28,14 @@ enum DashboardProbe {
     ProtocolError { reason: &'static str },
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn app_paths() -> Option<AppPaths> {
-    std::env::var_os("HOME").map(|home| AppPaths::from_home(std::path::Path::new(&home)))
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| AppPaths::from_home(std::path::Path::new(&home)))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn is_offline(error: &HealthError) -> bool {
     matches!(
         error,
@@ -45,7 +49,7 @@ fn is_offline(error: &HealthError) -> bool {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[tauri::command]
 fn host_health() -> HostProbe {
     let Some(paths) = app_paths() else {
@@ -64,7 +68,7 @@ fn host_health() -> HostProbe {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[tauri::command]
 fn host_dashboard() -> DashboardProbe {
     let Some(paths) = app_paths() else {
@@ -86,7 +90,7 @@ fn host_dashboard() -> DashboardProbe {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[tauri::command]
 fn bind_slot(
     slot: u8,
@@ -109,19 +113,44 @@ fn bind_slot(
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn main() {
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            host_health,
-            host_dashboard,
-            bind_slot
-        ])
-        .run(tauri::generate_context!())
+    let mut context = tauri::generate_context!();
+    let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
+        host_health,
+        host_dashboard,
+        bind_slot
+    ]);
+    #[cfg(target_os = "windows")]
+    let builder = {
+        // Set the data directory on the builder: the pinned runtime does not
+        // copy WindowConfig.data_directory into WebviewAttributes.
+        let windows = context.config().app.windows.clone();
+        for window in &mut context.config_mut().app.windows {
+            window.create = false;
+        }
+        builder.setup(move |app| {
+            // Keep browser writes inside the existing writable Host support
+            // root. LocalAppData can be read-only under the Windows token
+            // used by the original installation.
+            let paths = app_paths().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "home unavailable")
+            })?;
+            let directory = paths.root.join("desktop-webview-v2");
+            for window in windows.iter().filter(|window| window.create) {
+                tauri::WebviewWindowBuilder::from_config(app, window)?
+                    .data_directory(directory.clone())
+                    .build()?;
+            }
+            Ok(())
+        })
+    };
+    builder
+        .run(context)
         .expect("Codex Keyboard desktop runtime failed");
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn main() {
-    println!("Codex Keyboard desktop requires macOS");
+    println!("Codex Keyboard desktop requires macOS or Windows");
 }

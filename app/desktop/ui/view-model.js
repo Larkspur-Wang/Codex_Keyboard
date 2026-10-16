@@ -48,6 +48,7 @@
  * @typedef {{
  *   v: number,
  *   tasks: DashboardTask[],
+ *   lan?: {listening_port: number, received_datagrams: number, authenticated_heartbeats: number, last_heartbeat_age_ms: number | null} | null,
  *   slots: DashboardSlot[],
  *   provider: {
  *     configured: boolean,
@@ -58,6 +59,18 @@
  *   }
  * }} DashboardSnapshot
  */
+
+/** @param {DashboardSnapshot["lan"]} lan @returns {string} */
+export function presentLanStatus(lan) {
+  if (!lan) return "Host 版本较旧，暂无键盘连接诊断";
+  if (lan.last_heartbeat_age_ms !== null && lan.last_heartbeat_age_ms <= 5000) {
+    return `键盘已认证连接 · UDP ${lan.listening_port}`;
+  }
+  if (lan.last_heartbeat_age_ms !== null)
+    return "键盘心跳中断，请检查电源与 Wi-Fi";
+  if (lan.received_datagrams > 0) return "已收到网络包，尚无认证心跳";
+  return `等待键盘连接 · UDP ${lan.listening_port}`;
+}
 
 /** @param {HostProbe} probe @returns {HostView} */
 export function presentProbe(probe) {

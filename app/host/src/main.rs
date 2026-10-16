@@ -9,7 +9,7 @@ use easy_codex_host::codex_catalog::CodexTaskCatalog;
 #[cfg(target_os = "macos")]
 use easy_codex_host::dashscope::DashScopeTtsClient;
 use easy_codex_host::dashscope::{ASR_MODEL, DashScopeAsrClient, DashScopeHandshake};
-use easy_codex_host::health::{HEALTH_SOCKET_NAME, HostDaemon, query_health};
+use easy_codex_host::health::{HEALTH_SOCKET_NAME, HostDaemon, bind_dashboard_slot, query_health};
 use easy_codex_host::lan_voice::{WhisperCppConfig, import_default_whisper_model};
 use easy_codex_host::launch_agent::{
     DeploymentMode, deploy_current_executable, is_loaded, uninstall,
@@ -38,6 +38,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match raw.as_str() {
             "import-dashscope-key" => {
                 return import_dashscope(arguments.next(), arguments.next());
+            }
+            "import-bailian-key" | "import-bl-key" => {
+                let target = arguments.next();
+                require_no_more_arguments(&mut arguments, "import-bailian-key")?;
+                return import_bailian_cli(target.map(std::path::PathBuf::from));
             }
             "dashscope-key-status" => {
                 require_no_more_arguments(&mut arguments, "dashscope-key-status")?;
@@ -183,8 +188,14 @@ fn require_no_more_arguments(
     Ok(())
 }
 
+fn user_home_os() -> Result<std::ffi::OsString, Box<dyn std::error::Error>> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| "HOME is unavailable".into())
+}
+
 fn home_paths() -> Result<AppPaths, Box<dyn std::error::Error>> {
-    let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
+    let home = user_home_os()?;
     Ok(AppPaths::from_home(Path::new(&home)))
 }
 
@@ -218,6 +229,19 @@ fn print_codex_catalog_status() -> Result<(), Box<dyn std::error::Error>> {
 
 fn bind_slot(slot: u8, task_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let paths = home_paths()?;
+    let socket = paths.runtime_directory.join(HEALTH_SOCKET_NAME);
+    if let Ok(dashboard) = bind_dashboard_slot(&socket, slot, task_id, None) {
+        let generation = dashboard
+            .slots
+            .iter()
+            .find(|candidate| candidate.slot == slot)
+            .and_then(|candidate| candidate.binding_generation)
+            .unwrap_or(1);
+        println!("status=bound");
+        println!("slot={slot}");
+        println!("generation={generation}");
+        return Ok(());
+    }
     paths.prepare()?;
     let catalog = CodexTaskCatalog::from_environment()?;
     let service = BindingService::new(&catalog);
@@ -239,12 +263,13 @@ fn provision_keyboard_lan(
     host: std::net::IpAddr,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-
     let mut password = String::new();
-    std::io::stdin().take(65).read_to_string(&mut password)?;
+    std::io::stdin().read_line(&mut password)?;
     while matches!(password.as_bytes().last(), Some(b'\n' | b'\r')) {
         password.pop();
+    }
+    if password.len() > 64 {
+        return Err("Wi-Fi password exceeds 64 bytes".into());
     }
     let paths = home_paths()?;
     let device_secret = load_or_create_device_secret(&paths)?;
@@ -394,7 +419,7 @@ fn abandon_slot_summary(slot: u8) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn deploy_launch_agent(mode: DeploymentMode) -> Result<(), Box<dyn std::error::Error>> {
-    let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
+    let home = user_home_os()?;
     deploy_current_executable(Path::new(&home), mode)?;
     println!(
         "status={}",
@@ -407,7 +432,7 @@ fn deploy_launch_agent(mode: DeploymentMode) -> Result<(), Box<dyn std::error::E
 }
 
 fn uninstall_launch_agent() -> Result<(), Box<dyn std::error::Error>> {
-    let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
+    let home = user_home_os()?;
     uninstall(Path::new(&home))?;
     println!("status=uninstalled");
     Ok(())
@@ -431,12 +456,58 @@ fn import_dashscope(
     }
     let source =
         source.ok_or("import-dashscope-key requires an explicitly selected source file")?;
-    let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
+    if source == "--bl" || source == "bl" || source == "--bailian" || source == "bailian" {
+        return import_bailian_cli(None);
+    }
+    let source_path = std::path::Path::new(&source);
+    if source_path.extension().is_some_and(|ext| ext == "json") {
+        return import_bailian_cli(Some(source_path.to_path_buf()));
+    }
+    let home = user_home_os()?;
     let paths = AppPaths::from_home(std::path::Path::new(&home));
     paths.prepare()?;
     let import_lock = ImportLock::acquire(&paths.runtime_directory.join("key-import.lock"))?;
     let receipt = configure_dashscope_env(
-        std::path::Path::new(&source),
+        source_path,
+        &paths.dashscope_env,
+        &DashScopeHandshake::default(),
+        &import_lock,
+    )?;
+    #[cfg(target_os = "macos")]
+    {
+        let accounts = KeychainAccounts::load_or_create(&paths.installation_id, &import_lock)?;
+        remove_legacy_dashscope_items(&MacKeychainStore::background(), &accounts)?;
+    }
+    println!("status=configured_verified");
+    println!("event_id={}", receipt.event_id);
+    println!("region={}", receipt.region);
+    println!("model={}", receipt.model);
+    println!("server_event={}", receipt.server_event);
+    println!("transport={}", receipt.transport);
+    Ok(())
+}
+
+fn import_bailian_cli(
+    custom_path: Option<std::path::PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let home = user_home_os()?;
+    let bailian_config_path = custom_path.unwrap_or_else(|| {
+        std::path::Path::new(&home)
+            .join(".bailian")
+            .join("config.json")
+    });
+    if !bailian_config_path.exists() {
+        return Err(format!(
+            "bailian-cli config not found at {}. Please run 'bl auth login' first.",
+            bailian_config_path.display()
+        )
+        .into());
+    }
+    let paths = AppPaths::from_home(std::path::Path::new(&home));
+    paths.prepare()?;
+    let import_lock = ImportLock::acquire(&paths.runtime_directory.join("key-import.lock"))?;
+    let receipt = easy_codex_host::secrets::configure_dashscope_from_bailian(
+        &bailian_config_path,
         &paths.dashscope_env,
         &DashScopeHandshake::default(),
         &import_lock,
@@ -456,7 +527,7 @@ fn import_dashscope(
 }
 
 fn dashscope_status() -> Result<(), Box<dyn std::error::Error>> {
-    let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
+    let home = user_home_os()?;
     let paths = AppPaths::from_home(std::path::Path::new(&home));
     paths.prepare()?;
     let import_lock = ImportLock::acquire(&paths.runtime_directory.join("key-import.lock"))?;

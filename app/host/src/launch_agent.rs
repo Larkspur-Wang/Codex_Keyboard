@@ -1,46 +1,50 @@
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use std::ffi::CString;
 #[cfg(target_os = "macos")]
 use std::ffi::OsStr;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use std::fs::{self, File, OpenOptions};
 use std::io;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use std::io::{Read, Write};
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::{Command, Stdio};
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", all(test, unix)))]
 use std::time::Duration;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::time::Instant;
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use fs2::FileExt;
 use thiserror::Error;
 
 use crate::health::HEALTH_SOCKET_NAME;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", all(test, unix)))]
 use crate::health::HealthSnapshot;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use crate::health::HealthState;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::health::{HealthError, query_health};
 use crate::paths::AppPaths;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use crate::paths::{
     ExplicitFileLock, open_owned_directory_chain, open_private_file, secure_directory,
 };
 
 pub const LAUNCH_AGENT_LABEL: &str = "com.larkspur.easy-codex-input.host";
+#[cfg(target_os = "windows")]
+const INSTALLED_BINARY_NAME: &str = "easy-codex-host.exe";
+#[cfg(not(target_os = "windows"))]
 const INSTALLED_BINARY_NAME: &str = "easy-codex-host";
 const PLIST_NAME: &str = "com.larkspur.easy-codex-input.host.plist";
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 const STOP_TIMEOUT: Duration = Duration::from_secs(25);
 #[cfg(target_os = "macos")]
 const STOP_STABLE_WINDOW: Duration = Duration::from_millis(250);
@@ -138,7 +142,19 @@ pub fn deploy_current_executable(
     Ok(paths)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn deploy_current_executable(
+    home: &Path,
+    mode: DeploymentMode,
+) -> Result<LaunchAgentPaths, LaunchAgentError> {
+    let source = std::env::current_exe()?;
+    let paths = LaunchAgentPaths::from_home(home)?;
+    let controller = WindowsServiceController::new(&paths);
+    deploy_windows(&paths, &source, mode, &controller)?;
+    Ok(paths)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn deploy_current_executable(
     _home: &Path,
     _mode: DeploymentMode,
@@ -161,7 +177,21 @@ pub fn uninstall(home: &Path) -> Result<LaunchAgentPaths, LaunchAgentError> {
     Ok(paths)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn uninstall(home: &Path) -> Result<LaunchAgentPaths, LaunchAgentError> {
+    let paths = LaunchAgentPaths::from_home(home)?;
+    let controller = WindowsServiceController::new(&paths);
+    if controller.is_loaded()? {
+        controller.bootout()?;
+    }
+    controller.wait_stopped(&paths.health_socket(), Duration::from_secs(5))?;
+    if paths.installed_binary.exists() {
+        let _ = std::fs::remove_file(&paths.installed_binary);
+    }
+    Ok(paths)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn uninstall(_home: &Path) -> Result<LaunchAgentPaths, LaunchAgentError> {
     Err(LaunchAgentError::StopFailed)
 }
@@ -171,12 +201,201 @@ pub fn is_loaded() -> Result<bool, LaunchAgentError> {
     MacLaunchctl::current_user().is_loaded()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn is_loaded() -> Result<bool, LaunchAgentError> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or(LaunchAgentError::InvalidPath)?;
+    let paths = LaunchAgentPaths::from_home(Path::new(&home))?;
+    let controller = WindowsServiceController::new(&paths);
+    controller.is_loaded()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn is_loaded() -> Result<bool, LaunchAgentError> {
     Ok(false)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "windows")]
+struct WindowsServiceController {
+    installed_binary: PathBuf,
+    health_socket: PathBuf,
+    log: PathBuf,
+    working_directory: PathBuf,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsServiceController {
+    fn new(paths: &LaunchAgentPaths) -> Self {
+        Self {
+            installed_binary: paths.installed_binary.clone(),
+            health_socket: paths.health_socket(),
+            log: paths.log.clone(),
+            working_directory: paths.app.root.clone(),
+        }
+    }
+
+    fn is_loaded(&self) -> Result<bool, LaunchAgentError> {
+        match query_health(&self.health_socket) {
+            Ok(_) => Ok(true),
+            Err(error) if health_is_temporarily_unavailable(&error) => Ok(false),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn bootout(&self) -> Result<(), LaunchAgentError> {
+        if let Ok(snapshot) = query_health(&self.health_socket) {
+            let pid = snapshot.pid;
+            let _ = Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .output();
+        }
+        Ok(())
+    }
+
+    fn wait_stopped(&self, socket: &Path, timeout: Duration) -> Result<(), LaunchAgentError> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !self.is_loaded()? {
+                let _ = std::fs::remove_file(socket);
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err(LaunchAgentError::StopFailed)
+    }
+
+    fn bootstrap(&self) -> Result<(), LaunchAgentError> {
+        use std::os::windows::process::CommandExt;
+
+        if let Some(parent) = self.log.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log)
+            .map_err(|_| LaunchAgentError::ActivationFailed)?;
+        let log_err = log_file
+            .try_clone()
+            .map_err(|_| LaunchAgentError::ActivationFailed)?;
+
+        let mut command = Command::new(&self.installed_binary);
+        command.arg("daemon");
+        command.current_dir(&self.working_directory);
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            command.env("HOME", home.clone());
+            command.env("USERPROFILE", home);
+        }
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+
+        let flags_with_breakaway =
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
+        let flags_default = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+
+        command.creation_flags(flags_with_breakaway);
+        command.stdin(Stdio::null());
+        command.stdout(log_file);
+        command.stderr(log_err);
+        if command.spawn().is_err() {
+            command.creation_flags(flags_default);
+            command
+                .spawn()
+                .map_err(|_| LaunchAgentError::ActivationFailed)?;
+        }
+        Ok(())
+    }
+
+    fn wait_healthy(
+        &self,
+        socket: &Path,
+        expected_version: &str,
+        previous_instance: Option<(u32, u64)>,
+        timeout: Duration,
+    ) -> Result<(), LaunchAgentError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match query_health(socket) {
+                Ok(snapshot)
+                    if snapshot.host_version == expected_version
+                        && previous_instance
+                            != Some((snapshot.pid, snapshot.started_at_unix_ms)) =>
+                {
+                    return Ok(());
+                }
+                Ok(_) => {}
+                Err(error) if health_is_temporarily_unavailable(&error) => {}
+                Err(_) => return Err(LaunchAgentError::ActivationFailed),
+            }
+            if Instant::now() >= deadline {
+                return Err(LaunchAgentError::ActivationFailed);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn deploy_windows(
+    paths: &LaunchAgentPaths,
+    source: &Path,
+    mode: DeploymentMode,
+    controller: &WindowsServiceController,
+) -> Result<(), LaunchAgentError> {
+    if let Some(parent) = paths.installed_binary.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::create_dir_all(&paths.app.runtime_directory)?;
+    std::fs::create_dir_all(paths.app.root.join("logs"))?;
+
+    let is_running = controller.is_loaded()?;
+    if mode == DeploymentMode::Upgrade && !paths.installed_binary.exists() {
+        return Err(LaunchAgentError::NotInstalled);
+    }
+    let previous_health = if is_running {
+        let health = query_health(&paths.health_socket()).ok();
+        controller.bootout()?;
+        controller.wait_stopped(&paths.health_socket(), Duration::from_secs(10))?;
+        health
+    } else {
+        None
+    };
+
+    std::fs::copy(source, &paths.installed_binary)?;
+
+    // A prior Windows deployment labelled the entire support tree Low.
+    // Executable labels cap the child's integrity level, which prevents
+    // native coding tools from writing their normal user-owned directories.
+    use std::os::windows::process::CommandExt;
+    let labelled = Command::new("icacls.exe")
+        .arg(&paths.installed_binary)
+        .args(["/setintegritylevel", "M"])
+        .creation_flags(0x0800_0000)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !labelled.success() {
+        return Err(LaunchAgentError::ActivationFailed);
+    }
+
+    controller.bootstrap()?;
+    controller.wait_healthy(
+        &paths.health_socket(),
+        env!("CARGO_PKG_VERSION"),
+        previous_health
+            .as_ref()
+            .map(|h| (h.pid, h.started_at_unix_ms)),
+        Duration::from_secs(10),
+    )?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
 trait ServiceController {
     fn is_loaded(&self) -> Result<bool, LaunchAgentError>;
     fn bootout(&self) -> Result<(), LaunchAgentError>;
@@ -346,7 +565,7 @@ impl ServiceController for MacLaunchctl {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn health_is_temporarily_unavailable(error: &HealthError) -> bool {
     matches!(error, HealthError::InvalidResponse)
         || matches!(
@@ -365,7 +584,7 @@ fn health_is_temporarily_unavailable(error: &HealthError) -> bool {
         )
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn deploy(
     paths: &LaunchAgentPaths,
     source: &Path,
@@ -445,7 +664,7 @@ fn deploy(
     Err(LaunchAgentError::ActivationFailed)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn prepare_directories(paths: &LaunchAgentPaths) -> Result<(), LaunchAgentError> {
     paths.app.prepare()?;
     secure_directory(&paths.app.root.join("bin"))?;
@@ -458,7 +677,7 @@ fn prepare_directories(paths: &LaunchAgentPaths) -> Result<(), LaunchAgentError>
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn acquire_management_lock(paths: &LaunchAgentPaths) -> Result<ExplicitFileLock, LaunchAgentError> {
     let file = open_private_file(&paths.management_lock)?;
     file.try_lock_exclusive()
@@ -469,7 +688,7 @@ fn acquire_management_lock(paths: &LaunchAgentPaths) -> Result<ExplicitFileLock,
     Ok(ExplicitFileLock::from_locked(file))
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn read_source_executable(path: &Path) -> Result<Vec<u8>, LaunchAgentError> {
     validate_absolute_path(path)?;
     let metadata = fs::symlink_metadata(path)?;
@@ -495,7 +714,7 @@ fn read_source_executable(path: &Path) -> Result<Vec<u8>, LaunchAgentError> {
     Ok(bytes)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn read_owned_regular_if_present(path: &Path) -> Result<Option<Vec<u8>>, LaunchAgentError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -520,7 +739,7 @@ fn read_owned_regular_if_present(path: &Path) -> Result<Option<Vec<u8>>, LaunchA
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn write_atomic_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<(), LaunchAgentError> {
     if fs::symlink_metadata(path).is_ok() {
         let metadata = fs::symlink_metadata(path)?;
@@ -576,7 +795,7 @@ fn write_atomic_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Launch
     result.map_err(LaunchAgentError::Io)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn restore_file(path: &Path, previous: Option<&[u8]>, mode: u32) -> Result<(), LaunchAgentError> {
     if let Some(bytes) = previous {
         write_atomic_owned(path, bytes, mode)
@@ -585,12 +804,12 @@ fn restore_file(path: &Path, previous: Option<&[u8]>, mode: u32) -> Result<(), L
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn remove_owned_regular_if_present(path: &Path) -> Result<(), LaunchAgentError> {
     remove_owned_regular_if_present_with_hook(path, || {})
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn remove_owned_regular_if_present_with_hook(
     path: &Path,
     before_rename: impl FnOnce(),
@@ -643,7 +862,7 @@ fn remove_owned_regular_if_present_with_hook(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn regular_identity_at(parent: &File, name: &CString) -> Result<(u64, u64), LaunchAgentError> {
     let mut status: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe {
@@ -721,14 +940,18 @@ fn wait_for_socket_removal(path: &Path, timeout: Duration) -> Result<(), LaunchA
 
 fn validate_absolute_path(path: &Path) -> Result<(), LaunchAgentError> {
     if !path.is_absolute()
-        || path.as_os_str().as_bytes().contains(&0)
+        || path.as_os_str().as_encoded_bytes().contains(&0)
         || path.to_str().is_none()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::CurDir | Component::Prefix(_)
-            )
-        })
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(LaunchAgentError::InvalidPath);
+    }
+    #[cfg(unix)]
+    if path
+        .components()
+        .any(|component| matches!(component, Component::Prefix(_)))
     {
         return Err(LaunchAgentError::InvalidPath);
     }
@@ -751,7 +974,7 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};

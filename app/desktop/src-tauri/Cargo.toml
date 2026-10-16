@@ -6,12 +6,16 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 easy-codex-host = { path = "../../host" }
 serde.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 tauri.workspace = true
 
-[target.'cfg(target_os = "macos")'.build-dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.build-dependencies]
 tauri-build.workspace = true

@@ -3,6 +3,7 @@ import {
   presentProbe,
   presentSlotStatus,
   sortedTasks,
+  presentLanStatus,
 } from "./view-model.js";
 
 /** @param {string} selector @returns {HTMLElement} */
@@ -35,6 +36,7 @@ const elements = {
   asrModel: requiredElement("#asr-model"),
   ttsModel: requiredElement("#tts-model"),
   ttsVoice: requiredElement("#tts-voice"),
+  lanState: requiredElement("#lan-state"),
 };
 
 /** @type {import("./view-model.js").DashboardSnapshot | null} */
@@ -81,6 +83,7 @@ function slotSnapshot(slot) {
 /** @param {import("./view-model.js").DashboardSnapshot} snapshot */
 function renderDashboard(snapshot) {
   dashboard = snapshot;
+  elements.lanState.textContent = presentLanStatus(snapshot.lan);
   const tasks = sortedTasks(snapshot.tasks);
   elements.taskCount.textContent = `${tasks.length} 个任务`;
   elements.providerDot.className = `provider-dot ${snapshot.provider.configured ? "ready" : "offline"}`;
@@ -204,6 +207,7 @@ async function refreshDashboard() {
     return;
   }
   const unavailable = presentDashboardFailure(probe.connection);
+  elements.lanState.textContent = "Host 不可达，无法读取键盘连接";
   elements.taskCount.textContent = unavailable.taskCount;
   elements.providerDot.className = "provider-dot offline";
   elements.providerState.textContent = unavailable.providerState;

@@ -1,16 +1,85 @@
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "macos")]
+#[cfg(all(unix, target_os = "macos"))]
 use std::os::fd::FromRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-#[cfg(target_os = "macos")]
+#[cfg(all(unix, target_os = "macos"))]
 use std::os::unix::net::UnixListener;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+
+#[inline]
+fn is_socket(meta: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        meta.file_type().is_socket()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
+#[inline]
+fn meta_uid_matches_euid(meta: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        meta.uid() == unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        true
+    }
+}
+
+#[inline]
+fn meta_mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        meta.mode()
+    }
+    #[cfg(not(unix))]
+    {
+        if meta.is_dir() { 0o755 } else { 0o644 }
+    }
+}
+
+#[inline]
+fn meta_nlink(meta: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        meta.nlink()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        1
+    }
+}
+
+#[inline]
+fn set_mode_permissions(path: &Path, mode: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Ok(())
+    }
+}
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -71,7 +140,10 @@ const MAX_AUTH_BYTES: u64 = 64 * 1024;
 const MAX_TURN_PACK_BYTES: usize = 64 * 1024;
 const MAX_TURN_PACK_TOTAL_BYTES: usize = 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 2 * 1024 * 1024;
+#[cfg(unix)]
 const MAX_CHILD_FILE_BYTES: libc::rlim_t = 16 * 1024 * 1024;
+#[cfg(not(unix))]
+const MAX_CHILD_FILE_BYTES: u64 = 16 * 1024 * 1024;
 pub const SPARK_MAX_WORKSPACE_BYTES: u64 = 8 * 1024 * 1024;
 pub const SPARK_MAX_WORKSPACE_NODES: usize = 32;
 const MAX_RUNTIME_DATABASE_BYTES: u64 = 2 * 1024 * 1024;
@@ -172,6 +244,7 @@ pub struct SparkRunnerConfig {
 impl Default for SparkRunnerConfig {
     fn default() -> Self {
         let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/nonexistent"));
         let codex_home = std::env::var_os("CODEX_HOME")
@@ -262,23 +335,35 @@ impl SparkRunner {
             &self.config.executable,
         )?;
 
+        #[cfg(unix)]
         let supervise = cfg!(target_os = "macos") && self.config.supervisor_executable.is_some();
+        #[cfg(not(unix))]
+        let supervise = false;
+
+        #[cfg(unix)]
         let (mut parent_control, child_control) = if supervise {
             let (parent, child) = UnixStream::pair().map_err(|_| SparkError::ProcessIo)?;
             (Some(parent), Some(child))
         } else {
             (None, None)
         };
+        #[cfg(not(unix))]
+        let (parent_control, child_control): (Option<()>, Option<()>) = (None, None);
+
+        #[cfg(unix)]
         let control_fd = child_control.as_ref().map(AsRawFd::as_raw_fd);
         let mut command = if supervise {
             let mut command = Command::new(self.config.supervisor_executable.as_ref().unwrap());
-            command.args([
-                "spark-supervisor",
-                &std::process::id().to_string(),
-                &control_fd.unwrap().to_string(),
-                &run.owner_lock_fd().to_string(),
-                &run.task_lock_fd().to_string(),
-            ]);
+            #[cfg(unix)]
+            {
+                command.args([
+                    "spark-supervisor",
+                    &std::process::id().to_string(),
+                    &control_fd.unwrap().to_string(),
+                    &run.owner_lock_fd().to_string(),
+                    &run.task_lock_fd().to_string(),
+                ]);
+            }
             command.env_clear();
             command.env("ECI_SPARK_EXECUTABLE", &self.config.executable);
             command.env("ECI_SPARK_CODEX_HOME", &run.codex_home);
@@ -300,12 +385,15 @@ impl SparkRunner {
                 &run.tmpdir,
             )
         };
+        #[cfg(unix)]
         let owner_lock_fd = run.owner_lock_fd();
+        #[cfg(unix)]
         let task_lock_fd = run.task_lock_fd();
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(unix)]
         unsafe {
             command.pre_exec(move || {
                 if libc::setpgid(0, 0) != 0 {
@@ -352,8 +440,10 @@ impl SparkRunner {
             }
         })?;
         let process_group = child.id() as i32;
+        #[allow(unused_mut)]
         let mut startup_guard = ChildGuard::new(child, process_group);
         drop(child_control);
+        #[cfg(unix)]
         if let Some(control) = parent_control.as_mut() {
             control
                 .set_nonblocking(true)
@@ -429,7 +519,8 @@ impl SparkRunner {
     fn drive_child(
         &self,
         mut child: Child,
-        mut control: Option<UnixStream>,
+        #[cfg(unix)] mut control: Option<UnixStream>,
+        #[cfg(not(unix))] _control: Option<()>,
         prompt: Zeroizing<Vec<u8>>,
         output_monitor: &OutputFileMonitor,
         auth_monitor: &AuthCopyMonitor,
@@ -456,7 +547,10 @@ impl SparkRunner {
                 .and_then(|_| stdin.flush())
                 .is_ok()
         });
+        #[cfg(unix)]
         let supervised = control.is_some();
+        #[cfg(not(unix))]
+        let supervised = false;
         let (status, supervisor_code) = loop {
             if let Err(error) = auth_monitor.check() {
                 guard.kill_and_wait();
@@ -473,6 +567,7 @@ impl SparkRunner {
                 join_io_threads(stdout_reader, stderr_reader, stdin_writer);
                 return Err(error);
             }
+            #[cfg(unix)]
             if let Some(control) = control.as_mut() {
                 let mut code = [0_u8; 1];
                 match control.read(&mut code) {
@@ -557,9 +652,19 @@ impl SparkRunner {
                 .as_ref()
                 .is_some_and(std::process::ExitStatus::success);
         if !succeeded {
-            if status.as_ref().and_then(|status| status.signal()).is_some() {
+            #[cfg(unix)]
+            let is_signal = status.as_ref().and_then(|status| status.signal()).is_some();
+            #[cfg(not(unix))]
+            let is_signal = status
+                .as_ref()
+                .is_some_and(|status| status.code().is_none());
+            if is_signal {
                 return Err(SparkError::ExitFailure);
             }
+            eprintln!(
+                "spark process failed: stderr={}",
+                String::from_utf8_lossy(&stderr)
+            );
             return Err(classify_stderr(&stderr));
         }
         Ok(())
@@ -798,8 +903,7 @@ impl SparkRunFiles {
             .prefix("spark-")
             .tempdir_in(temp_root)
             .map_err(|_| SparkError::UnsafeWorkspace)?;
-        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
-            .map_err(|_| SparkError::UnsafeWorkspace)?;
+        set_mode_permissions(root.path(), 0o700).map_err(|_| SparkError::UnsafeWorkspace)?;
         let owner_lock = open_private_file(&root.path().join("owner.lock"))
             .map_err(|_| SparkError::UnsafeWorkspace)?;
         owner_lock
@@ -812,8 +916,7 @@ impl SparkRunFiles {
         let tmpdir = root.path().join("tmp");
         for directory in [&codex_home, &workdir, &tmpdir] {
             fs::create_dir(directory).map_err(|_| SparkError::UnsafeWorkspace)?;
-            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
-                .map_err(|_| SparkError::UnsafeWorkspace)?;
+            set_mode_permissions(directory, 0o700).map_err(|_| SparkError::UnsafeWorkspace)?;
         }
         let auth_file = write_new_file(&codex_home.join("auth.json"), auth, 0o400)?;
         let sandbox_marker_file =
@@ -825,18 +928,15 @@ impl SparkRunFiles {
         }
         let home_arg0dir = home_tmpdir.join("arg0");
         fs::create_dir(&home_arg0dir).map_err(|_| SparkError::UnsafeWorkspace)?;
-        fs::set_permissions(&home_arg0dir, fs::Permissions::from_mode(0o700))
-            .map_err(|_| SparkError::UnsafeWorkspace)?;
+        set_mode_permissions(&home_arg0dir, 0o700).map_err(|_| SparkError::UnsafeWorkspace)?;
         for directory in [&skills_dir, &home_tmpdir] {
-            fs::set_permissions(directory, fs::Permissions::from_mode(0o500))
-                .map_err(|_| SparkError::UnsafeWorkspace)?;
+            set_mode_permissions(directory, 0o500).map_err(|_| SparkError::UnsafeWorkspace)?;
         }
         let schema = root.path().join("summary.schema.json");
         let output = root.path().join("summary.output.json");
         drop(write_new_file(&schema, output_schema().as_bytes(), 0o400)?);
         let output_file = write_new_file(&output, b"", 0o600)?;
-        fs::set_permissions(&workdir, fs::Permissions::from_mode(0o500))
-            .map_err(|_| SparkError::UnsafeWorkspace)?;
+        set_mode_permissions(&workdir, 0o500).map_err(|_| SparkError::UnsafeWorkspace)?;
         drop(sweep_lock);
         let registry_run = root.path().to_path_buf();
         process_state.live_runs.insert(registry_run);
@@ -863,11 +963,25 @@ impl SparkRunFiles {
     }
 
     fn owner_lock_fd(&self) -> i32 {
-        self.owner_lock.as_raw_fd()
+        #[cfg(unix)]
+        {
+            self.owner_lock.as_raw_fd()
+        }
+        #[cfg(not(unix))]
+        {
+            -1
+        }
     }
 
     fn task_lock_fd(&self) -> i32 {
-        self.task_lock.as_raw_fd()
+        #[cfg(unix)]
+        {
+            self.task_lock.as_raw_fd()
+        }
+        #[cfg(not(unix))]
+        {
+            -1
+        }
     }
 
     fn owner_guardian_path(&self) -> &Path {
@@ -917,22 +1031,32 @@ fn valid_task_lock_name(name: &str) -> bool {
 }
 
 fn remove_stale_guardian_or_report_busy(path: &Path) -> Result<(), SparkError> {
-    let result = UnixStream::connect(path);
-    match result {
-        Ok(_) => return Err(SparkError::Busy),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
-            ) => {}
-        Err(_) => return Err(SparkError::UnsafeWorkspace),
+    #[cfg(unix)]
+    {
+        let result = UnixStream::connect(path);
+        match result {
+            Ok(_) => return Err(SparkError::Busy),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+                ) => {}
+            Err(_) => return Err(SparkError::UnsafeWorkspace),
+        }
+        let metadata = fs::symlink_metadata(path).map_err(|_| SparkError::UnsafeWorkspace)?;
+        if !is_socket(&metadata) || !meta_uid_matches_euid(&metadata) {
+            return Err(SparkError::UnsafeWorkspace);
+        }
+        fs::remove_file(path).map_err(|_| SparkError::UnsafeWorkspace)
     }
-    let metadata = fs::symlink_metadata(path).map_err(|_| SparkError::UnsafeWorkspace)?;
-    if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } {
-        return Err(SparkError::UnsafeWorkspace);
+    #[cfg(not(unix))]
+    {
+        if path.exists() {
+            let _ = fs::remove_file(path);
+        }
+        Ok(())
     }
-    fs::remove_file(path).map_err(|_| SparkError::UnsafeWorkspace)
 }
 
 fn sweep_stale_runs(
@@ -965,16 +1089,17 @@ fn sweep_stale_runs(
         }
         let metadata =
             fs::symlink_metadata(entry.path()).map_err(|_| SparkError::UnsafeWorkspace)?;
-        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        if !metadata.file_type().is_dir() || !meta_uid_matches_euid(&metadata) {
             return Err(SparkError::UnsafeWorkspace);
         }
         let owner_path = entry.path().join("owner.lock");
-        let owner = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&owner_path)
-        {
+        let owner = match {
+            let mut opts = OpenOptions::new();
+            opts.read(true).write(true);
+            #[cfg(unix)]
+            opts.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+            opts.open(&owner_path)
+        } {
             Ok(owner) => Some(owner),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err(SparkError::UnsafeWorkspace),
@@ -985,25 +1110,28 @@ fn sweep_stale_runs(
                 Err(error) if error.kind() == fs2::lock_contended_error().kind() => continue,
                 Err(_) => return Err(SparkError::UnsafeWorkspace),
             }
+            drop(owner);
         }
-        let guardian_path = entry.path().join("guardian.sock");
-        match UnixStream::connect(&guardian_path) {
-            Ok(_) => continue,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
-                ) =>
-            {
-                let metadata = fs::symlink_metadata(&guardian_path)
-                    .map_err(|_| SparkError::UnsafeWorkspace)?;
-                if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() }
+        #[cfg(unix)]
+        {
+            let guardian_path = entry.path().join("guardian.sock");
+            match UnixStream::connect(&guardian_path) {
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+                    ) =>
                 {
-                    return Err(SparkError::UnsafeWorkspace);
+                    let metadata = fs::symlink_metadata(&guardian_path)
+                        .map_err(|_| SparkError::UnsafeWorkspace)?;
+                    if !is_socket(&metadata) || !meta_uid_matches_euid(&metadata) {
+                        return Err(SparkError::UnsafeWorkspace);
+                    }
                 }
+                Err(_) => return Err(SparkError::UnsafeWorkspace),
             }
-            Err(_) => return Err(SparkError::UnsafeWorkspace),
         }
         let quarantine = temp_root.join(format!(".trash-{}", uuid::Uuid::new_v4()));
         fs::rename(entry.path(), &quarantine).map_err(|_| SparkError::UnsafeWorkspace)?;
@@ -1026,10 +1154,10 @@ fn make_private_tree_writable_best_effort(path: &Path) {
         let Ok(metadata) = fs::symlink_metadata(&directory) else {
             continue;
         };
-        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        if !metadata.file_type().is_dir() || !meta_uid_matches_euid(&metadata) {
             continue;
         }
-        let _ = fs::set_permissions(&directory, fs::Permissions::from_mode(0o700));
+        let _ = set_mode_permissions(&directory, 0o700);
         if let Ok(entries) = fs::read_dir(&directory) {
             for entry in entries.flatten() {
                 if fs::symlink_metadata(entry.path())
@@ -1055,7 +1183,7 @@ impl Drop for SparkRunFiles {
             file.lock_exclusive().ok()?;
             Some(ExplicitFileLock::from_locked(file))
         });
-        let _ = fs::set_permissions(&self.workdir, fs::Permissions::from_mode(0o700));
+        let _ = set_mode_permissions(&self.workdir, 0o700);
         truncate_sensitive_file_handle(&mut self.auth_file);
         truncate_sensitive_file_handle(&mut self.output_file);
         if let Some(root) = self.root.take() {
@@ -1072,9 +1200,9 @@ impl Drop for SparkRunFiles {
 }
 
 fn remove_owned_socket_best_effort(path: &Path) {
-    if fs::symlink_metadata(path).is_ok_and(|metadata| {
-        metadata.file_type().is_socket() && metadata.uid() == unsafe { libc::geteuid() }
-    }) {
+    if fs::symlink_metadata(path)
+        .is_ok_and(|metadata| is_socket(&metadata) && meta_uid_matches_euid(&metadata))
+    {
         let _ = fs::remove_file(path);
     }
 }
@@ -1107,6 +1235,7 @@ fn output_schema() -> String {
 }
 
 fn write_new_file(path: &Path, bytes: &[u8], mode: u32) -> Result<File, SparkError> {
+    #[cfg(unix)]
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -1115,6 +1244,16 @@ fn write_new_file(path: &Path, bytes: &[u8], mode: u32) -> Result<File, SparkErr
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(path)
         .map_err(|_| SparkError::UnsafeWorkspace)?;
+    #[cfg(not(unix))]
+    let mut file = {
+        let _ = mode;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|_| SparkError::UnsafeWorkspace)?
+    };
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
         .map_err(|_| SparkError::UnsafeWorkspace)?;
@@ -1127,15 +1266,25 @@ fn open_auth(path: &Path) -> Result<File, SparkError> {
     }
     let parent = path.parent().ok_or(SparkError::Authentication)?;
     open_owned_directory_chain(parent, false).map_err(|_| SparkError::Authentication)?;
+    #[cfg(unix)]
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(path)
         .map_err(|_| SparkError::Authentication)?;
+    #[cfg(not(unix))]
+    let file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|_| SparkError::Authentication)?;
     let metadata = file.metadata().map_err(|_| SparkError::Authentication)?;
+    #[cfg(unix)]
+    let unsafe_mode = meta_mode(&metadata) & 0o077 != 0;
+    #[cfg(not(unix))]
+    let unsafe_mode = false;
     if !metadata.file_type().is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
+        || !meta_uid_matches_euid(&metadata)
+        || unsafe_mode
         || metadata.len() == 0
         || metadata.len() > MAX_AUTH_BYTES
     {
@@ -1166,7 +1315,7 @@ impl AuthSnapshot {
     fn verify_source(&self, path: &Path) -> Result<(), SparkError> {
         let mut file = open_auth(path)?;
         let identity = FileIdentity::from_file(&file).map_err(|_| SparkError::Authentication)?;
-        if identity.device != self.identity.device || identity.inode != self.identity.inode {
+        if identity != self.identity {
             return Err(SparkError::Authentication);
         }
         let bytes = read_auth_bytes(&mut file)?;
@@ -1203,23 +1352,72 @@ fn read_auth_bytes(file: &mut File) -> Result<Zeroizing<Vec<u8>>, SparkError> {
     Ok(bytes)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileIdentity {
+    #[cfg(unix)]
     device: u64,
+    #[cfg(unix)]
     inode: u64,
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
 }
 
 impl FileIdentity {
     fn from_file(file: &File) -> std::io::Result<Self> {
-        let metadata = file.metadata()?;
-        Ok(Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
+        let _metadata = file.metadata()?;
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            let handle = file.as_raw_handle();
+            let mut info = std::mem::MaybeUninit::<
+                windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION,
+            >::uninit();
+            let success = unsafe {
+                windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle(
+                    handle as _,
+                    info.as_mut_ptr(),
+                )
+            };
+            if success != 0 {
+                let info = unsafe { info.assume_init() };
+                let file_index = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+                Ok(Self {
+                    volume_serial_number: info.dwVolumeSerialNumber,
+                    file_index,
+                })
+            } else {
+                Ok(Self {
+                    volume_serial_number: 0,
+                    file_index: 0,
+                })
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = metadata;
+            Ok(Self {})
+        }
     }
 
     fn matches(&self, metadata: &fs::Metadata) -> bool {
-        metadata.dev() == self.device && metadata.ino() == self.inode
+        #[cfg(unix)]
+        {
+            metadata.dev() == self.device && metadata.ino() == self.inode
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            true
+        }
     }
 }
 
@@ -1265,15 +1463,25 @@ impl AuthCopyMonitor {
     }
 
     fn check(&self) -> Result<(), SparkError> {
+        #[cfg(unix)]
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(&self.path)
             .map_err(|_| SparkError::Authentication)?;
+        #[cfg(not(unix))]
+        let file = OpenOptions::new()
+            .read(true)
+            .open(&self.path)
+            .map_err(|_| SparkError::Authentication)?;
         let metadata = file.metadata().map_err(|_| SparkError::Authentication)?;
+        #[cfg(unix)]
+        let unsafe_mode = meta_mode(&metadata) & 0o777 != 0o400;
+        #[cfg(not(unix))]
+        let unsafe_mode = false;
         if !metadata.file_type().is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o777 != 0o400
+            || !meta_uid_matches_euid(&metadata)
+            || unsafe_mode
             || !self.identity.matches(&metadata)
             || metadata.len() == 0
             || metadata.len() > MAX_AUTH_BYTES
@@ -1410,7 +1618,7 @@ impl SparkWorkspaceMonitor {
             if nodes > SPARK_MAX_WORKSPACE_NODES {
                 return Err(SparkError::UnsafeWorkspace);
             }
-            if metadata.uid() != unsafe { libc::geteuid() } {
+            if !meta_uid_matches_euid(&metadata) {
                 return Err(if is_auth {
                     SparkError::Authentication
                 } else {
@@ -1467,19 +1675,19 @@ impl SparkWorkspaceMonitor {
                 continue;
             }
 
-            if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+            if !metadata.file_type().is_file() || meta_nlink(&metadata) != 1 {
                 return Err(if is_auth {
                     SparkError::Authentication
                 } else {
                     SparkError::UnsafeWorkspace
                 });
             }
-            let mode = metadata.mode() & 0o777;
+            let mode = meta_mode(&metadata) & 0o777;
             let limit = if name == "auth.json" {
                 if !self
                     .auth_identity
                     .is_some_and(|identity| identity.matches(&metadata))
-                    || mode != 0o400
+                    || (cfg!(unix) && mode != 0o400)
                 {
                     return Err(if is_auth {
                         SparkError::Authentication
@@ -1497,14 +1705,14 @@ impl SparkWorkspaceMonitor {
                 MAX_AUTH_BYTES
             } else if name == ".sandbox_migration" {
                 if !self.sandbox_marker_identity.matches(&metadata)
-                    || mode != 0o400
+                    || (cfg!(unix) && mode != 0o400)
                     || metadata.len() != 3
                 {
                     return Err(SparkError::UnsafeWorkspace);
                 }
                 3
             } else {
-                if mode & 0o133 != 0 {
+                if cfg!(unix) && mode & 0o133 != 0 {
                     return Err(SparkError::UnsafeWorkspace);
                 }
                 runtime_file_limit(&name).ok_or(SparkError::UnsafeWorkspace)?
@@ -1566,8 +1774,8 @@ fn audit_arg0_scratch(arg0: &Path, alias_target: &Path) -> Result<(usize, u64), 
     }
     let metadata = fs::symlink_metadata(entry.path()).map_err(|_| SparkError::UnsafeWorkspace)?;
     if !metadata.file_type().is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o777 != 0o755
+        || !meta_uid_matches_euid(&metadata)
+        || (cfg!(unix) && meta_mode(&metadata) & 0o777 != 0o755)
     {
         return Err(SparkError::UnsafeWorkspace);
     }
@@ -1586,12 +1794,12 @@ fn audit_arg0_scratch(arg0: &Path, alias_target: &Path) -> Result<(usize, u64), 
         }
         let metadata =
             fs::symlink_metadata(child.path()).map_err(|_| SparkError::UnsafeWorkspace)?;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.nlink() != 1 {
+        if !meta_uid_matches_euid(&metadata) || meta_nlink(&metadata) != 1 {
             return Err(SparkError::UnsafeWorkspace);
         }
         if child_name == ".lock" {
             if !metadata.file_type().is_file()
-                || metadata.mode() & 0o777 != 0o644
+                || (cfg!(unix) && meta_mode(&metadata) & 0o777 != 0o644)
                 || metadata.len() != 0
             {
                 return Err(SparkError::UnsafeWorkspace);
@@ -1621,23 +1829,45 @@ fn audit_arg0_scratch(arg0: &Path, alias_target: &Path) -> Result<(usize, u64), 
 fn trusted_executable_path(executable: &Path) -> Result<PathBuf, SparkError> {
     let path = fs::canonicalize(executable).map_err(|_| SparkError::CliMissing)?;
     let metadata = fs::symlink_metadata(&path).map_err(|_| SparkError::CliMissing)?;
-    let owner = metadata.uid();
-    if !metadata.file_type().is_file()
-        || (owner != unsafe { libc::geteuid() } && owner != 0)
-        || metadata.mode() & 0o022 != 0
-        || metadata.mode() & 0o111 == 0
+    #[cfg(unix)]
     {
-        return Err(SparkError::CliMissing);
+        let owner = metadata.uid();
+        if !metadata.file_type().is_file()
+            || (owner != unsafe { libc::geteuid() } && owner != 0)
+            || metadata.mode() & 0o022 != 0
+            || metadata.mode() & 0o111 == 0
+        {
+            return Err(SparkError::CliMissing);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if !metadata.file_type().is_file() {
+            return Err(SparkError::CliMissing);
+        }
     }
     Ok(path)
 }
 
 fn private_directory_identity(path: &Path, mode: u32) -> Result<FileIdentity, SparkError> {
+    #[cfg(unix)]
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY)
         .open(path)
         .map_err(|_| SparkError::UnsafeWorkspace)?;
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .map_err(|_| SparkError::UnsafeWorkspace)?
+    };
+    #[cfg(not(any(unix, windows)))]
+    let file = File::open(path).map_err(|_| SparkError::UnsafeWorkspace)?;
+
     let metadata = file.metadata().map_err(|_| SparkError::UnsafeWorkspace)?;
     if !private_directory_matches(
         &metadata,
@@ -1650,10 +1880,18 @@ fn private_directory_identity(path: &Path, mode: u32) -> Result<FileIdentity, Sp
 }
 
 fn private_directory_matches(metadata: &fs::Metadata, mode: u32, identity: FileIdentity) -> bool {
-    metadata.file_type().is_dir()
-        && metadata.uid() == unsafe { libc::geteuid() }
-        && metadata.mode() & 0o777 == mode
-        && identity.matches(metadata)
+    #[cfg(unix)]
+    {
+        metadata.file_type().is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o777 == mode
+            && identity.matches(metadata)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        metadata.file_type().is_dir() && identity.matches(metadata)
+    }
 }
 
 fn runtime_file_limit(name: &str) -> Option<u64> {
@@ -1718,13 +1956,25 @@ fn validate_runtime_databases(codex_home: &Path) -> Result<(), SparkError> {
 }
 
 fn open_output_for_read(path: &Path) -> Result<File, SparkError> {
+    #[cfg(unix)]
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(path)
         .map_err(|_| SparkError::InvalidOutput)?;
+    #[cfg(not(unix))]
+    let file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|_| SparkError::InvalidOutput)?;
+
     let metadata = file.metadata().map_err(|_| SparkError::InvalidOutput)?;
+    #[cfg(unix)]
     if !metadata.file_type().is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(SparkError::InvalidOutput);
+    }
+    #[cfg(not(unix))]
+    if !metadata.file_type().is_file() {
         return Err(SparkError::InvalidOutput);
     }
     Ok(file)
@@ -1791,6 +2041,22 @@ fn spark_command(
     command.env("HOME", codex_home);
     command.env("TMPDIR", tmpdir);
     inherit_proxy_environment(&mut command);
+    #[cfg(windows)]
+    for var in [
+        "PATH",
+        "SystemRoot",
+        "ComSpec",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+    ] {
+        if let Some(val) = std::env::var_os(var) {
+            command.env(var, val);
+        }
+    }
     command
 }
 
@@ -1805,15 +2071,13 @@ pub fn verify_spark_prompt_isolation(
             .tempdir_in(temp_root)
             .map_err(|_| SparkError::UnsafeWorkspace)?,
     );
-    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
-        .map_err(|_| SparkError::UnsafeWorkspace)?;
+    set_mode_permissions(root.path(), 0o700).map_err(|_| SparkError::UnsafeWorkspace)?;
     let home = root.path().join("home");
     let work = root.path().join("work");
     let process_tmp = root.path().join("process-tmp");
     for directory in [&home, &work, &process_tmp] {
         fs::create_dir(directory).map_err(|_| SparkError::UnsafeWorkspace)?;
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
-            .map_err(|_| SparkError::UnsafeWorkspace)?;
+        set_mode_permissions(directory, 0o700).map_err(|_| SparkError::UnsafeWorkspace)?;
     }
     let skills = home.join("skills");
     let home_tmp = home.join("tmp");
@@ -1822,15 +2086,12 @@ pub fn verify_spark_prompt_isolation(
     }
     let home_arg0 = home_tmp.join("arg0");
     fs::create_dir(&home_arg0).map_err(|_| SparkError::UnsafeWorkspace)?;
-    fs::set_permissions(&home_arg0, fs::Permissions::from_mode(0o700))
-        .map_err(|_| SparkError::UnsafeWorkspace)?;
+    set_mode_permissions(&home_arg0, 0o700).map_err(|_| SparkError::UnsafeWorkspace)?;
     for directory in [&skills, &home_tmp] {
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o500))
-            .map_err(|_| SparkError::UnsafeWorkspace)?;
+        set_mode_permissions(directory, 0o500).map_err(|_| SparkError::UnsafeWorkspace)?;
     }
     let sandbox_marker = write_new_file(&home.join(".sandbox_migration"), b"v1\n", 0o400)?;
-    fs::set_permissions(&work, fs::Permissions::from_mode(0o500))
-        .map_err(|_| SparkError::UnsafeWorkspace)?;
+    set_mode_permissions(&work, 0o500).map_err(|_| SparkError::UnsafeWorkspace)?;
     let monitor = SparkWorkspaceMonitor::new_without_auth(
         &home,
         &sandbox_marker,
@@ -1856,6 +2117,23 @@ pub fn verify_spark_prompt_isolation(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(windows)]
+    for var in [
+        "PATH",
+        "SystemRoot",
+        "ComSpec",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+    ] {
+        if let Some(val) = std::env::var_os(var) {
+            command.env(var, val);
+        }
+    }
+    #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
             if libc::setpgid(0, 0) != 0 {
@@ -1949,8 +2227,12 @@ pub fn verify_spark_prompt_isolation(
         return Err(SparkError::OutputTooLarge);
     }
     if !status.success() {
-        if status.signal().is_some() {
-            return Err(SparkError::ExitFailure);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if status.signal().is_some() {
+                return Err(SparkError::ExitFailure);
+            }
         }
         return Err(classify_stderr(&stderr));
     }
@@ -2159,6 +2441,7 @@ impl ChildGuard {
 
     fn kill_and_wait(&mut self) {
         if let Some(mut child) = self.child.take() {
+            #[cfg(unix)]
             unsafe {
                 libc::kill(-self.process_group, libc::SIGKILL);
             }
@@ -2168,6 +2451,7 @@ impl ChildGuard {
     }
 
     fn disarm(&mut self) {
+        #[cfg(unix)]
         unsafe {
             libc::kill(-self.process_group, libc::SIGKILL);
         }
@@ -2400,7 +2684,7 @@ pub fn run_spark_supervisor(
     Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;

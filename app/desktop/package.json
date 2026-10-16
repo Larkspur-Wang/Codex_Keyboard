@@ -7,6 +7,7 @@
   "scripts": {
     "build": "node scripts/verify-assets.mjs",
     "bundle:mac": "tauri build --bundles app --no-sign",
+    "bundle:win": "node scripts/build-windows.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

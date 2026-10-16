@@ -1,5 +1,3 @@
-#![cfg(target_os = "macos")]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,7 +73,7 @@ impl Runtime {
     }
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 pub(crate) fn open_shared_cache(paths: &AppPaths) -> Result<CacheStore, String> {
     let lock = ImportLock::acquire(&paths.runtime_directory.join("key-import.lock"))
         .map_err(|error| error.to_string())?;

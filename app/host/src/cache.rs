@@ -1,9 +1,16 @@
+#[cfg(windows)]
+use crate::paths::path_from_dir_handle;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{CStr, CString, OsStr, OsString};
+#[cfg(unix)]
+use std::ffi::{CStr, CString};
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -522,7 +529,7 @@ impl CacheStore {
         let (task_handle, created) =
             open_or_create_directory_at(&self.root_directory, OsStr::new(&task_name))?;
         if created {
-            self.root_directory.sync_all()?;
+            sync_directory(&self.root_directory)?;
         }
         if entry_exists(&task_handle, OsStr::new(&id.generation_name()))? {
             return Err(CacheError::AlreadyPublished);
@@ -548,7 +555,7 @@ impl CacheStore {
                 bundle.device_eiad,
             )?;
             checkpoint(PublishCheckpoint::DeviceEiadSynced)?;
-            temporary_handle.sync_all()?;
+            sync_directory(&temporary_handle)?;
             checkpoint(PublishCheckpoint::TemporaryDirectorySynced)?;
 
             rename_noreplace(
@@ -559,7 +566,7 @@ impl CacheStore {
             )?;
             renamed = true;
             checkpoint(PublishCheckpoint::Renamed)?;
-            task_handle.sync_all()?;
+            sync_directory(&task_handle)?;
             checkpoint(PublishCheckpoint::ParentDirectorySynced)
         })();
 
@@ -577,23 +584,7 @@ impl CacheStore {
         plaintext: &[u8],
     ) -> Result<(), CacheError> {
         let encrypted = encrypt_object(&self.key, id, kind, plaintext)?;
-        let name = CString::new(kind.file_name()).map_err(|_| CacheError::Corrupt)?;
-        let descriptor = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if descriptor < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let mut file = unsafe { File::from_raw_fd(descriptor) };
-        set_file_mode(&file, 0o600)?;
-        file.write_all(&encrypted)?;
-        file.sync_all()?;
-        Ok(())
+        write_create_only_file(directory, OsStr::new(kind.file_name()), &encrypted)
     }
 
     fn read_object(
@@ -655,8 +646,33 @@ impl CacheStore {
             let task_directory = open_directory_at(&self.root_directory, OsStr::new(task_name))
                 .map_err(|_| CacheError::Corrupt)?;
             let task_metadata = task_directory.metadata()?;
-            validate_directory(&task_metadata)?;
+            #[cfg(unix)]
             let task_identity = (task_metadata.dev(), task_metadata.ino());
+            #[cfg(windows)]
+            let task_identity = {
+                use std::os::windows::io::AsRawHandle;
+                let handle = task_directory.as_raw_handle();
+                let mut info = std::mem::MaybeUninit::<
+                    windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION,
+                >::uninit();
+                let success = unsafe {
+                    windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle(
+                        handle as _,
+                        info.as_mut_ptr(),
+                    )
+                };
+                if success != 0 {
+                    let info = unsafe { info.assume_init() };
+                    (
+                        info.dwVolumeSerialNumber as u64,
+                        ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64),
+                    )
+                } else {
+                    (0, 0)
+                }
+            };
+            #[cfg(not(any(unix, windows)))]
+            let task_identity = (0, 0);
             if task_identities
                 .insert(task_name.to_owned(), task_identity)
                 .is_some()
@@ -734,9 +750,9 @@ impl CacheStore {
             &task_handle,
             OsStr::new(&temporary_name),
         )?;
-        task_handle.sync_all()?;
+        sync_directory(&task_handle)?;
         remove_flat_directory_at(&task_handle, OsStr::new(&temporary_name))?;
-        task_handle.sync_all()?;
+        sync_directory(&task_handle)?;
         Ok(())
     }
 
@@ -745,7 +761,7 @@ impl CacheStore {
             open_directory_at(&self.root_directory, OsStr::new(&temporary.task_name))?;
         validate_identity(&task_handle.metadata()?, temporary.task_identity)?;
         remove_flat_directory_at(&task_handle, OsStr::new(&temporary.temporary_name))?;
-        task_handle.sync_all()?;
+        sync_directory(&task_handle)?;
         Ok(())
     }
 
@@ -753,10 +769,13 @@ impl CacheStore {
         for task_name in directory_names(&self.root_directory)? {
             let task_name = task_name.to_str().ok_or(CacheError::Corrupt)?;
             if is_task_hash(task_name) {
-                open_directory_at(&self.root_directory, OsStr::new(task_name))?.sync_all()?;
+                sync_directory(&open_directory_at(
+                    &self.root_directory,
+                    OsStr::new(task_name),
+                )?)?;
             }
         }
-        self.root_directory.sync_all()?;
+        sync_directory(&self.root_directory)?;
         Ok(())
     }
 
@@ -1052,14 +1071,14 @@ fn write_key_marker(root: &File, key: &CacheKey) -> Result<(), CacheError> {
     let temporary_name = format!("{KEY_MARKER_TEMP_PREFIX}{}", uuid::Uuid::new_v4());
     let result = (|| {
         write_create_only_file(root, OsStr::new(&temporary_name), &encoded)?;
-        root.sync_all()?;
+        sync_directory(root)?;
         rename_noreplace(
             root,
             OsStr::new(&temporary_name),
             root,
             OsStr::new(KEY_MARKER_FILE),
         )?;
-        root.sync_all()?;
+        sync_directory(root)?;
         Ok(())
     })();
     if result.is_err() {
@@ -1100,18 +1119,24 @@ fn cleanup_key_marker_temporaries(root: &File) -> Result<(), CacheError> {
             return Err(CacheError::Corrupt);
         }
         let metadata = metadata_at(root, &name)?;
+        #[cfg(unix)]
         if !stat_is_regular(&metadata) || metadata.st_uid != unsafe { libc::geteuid() } {
+            return Err(CacheError::Corrupt);
+        }
+        #[cfg(not(unix))]
+        if !stat_is_regular(&metadata) {
             return Err(CacheError::Corrupt);
         }
         unlink_file_at(root, &name)?;
         removed = true;
     }
     if removed {
-        root.sync_all()?;
+        sync_directory(root)?;
     }
     Ok(())
 }
 
+#[cfg(unix)]
 fn write_create_only_file(
     directory: &File,
     name: &OsStr,
@@ -1136,11 +1161,35 @@ fn write_create_only_file(
     Ok(())
 }
 
-fn set_file_mode(file: &File, mode: u32) -> Result<(), CacheError> {
-    file.set_permissions(fs::Permissions::from_mode(mode))?;
+#[cfg(windows)]
+fn write_create_only_file(
+    directory: &File,
+    name: &OsStr,
+    contents: &[u8],
+) -> Result<(), CacheError> {
+    let path = path_from_dir_handle(directory)?.join(name);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
     Ok(())
 }
 
+fn set_file_mode(file: &File, mode: u32) -> Result<(), CacheError> {
+    #[cfg(unix)]
+    {
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, mode);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn open_directory_at(parent: &File, name: &OsStr) -> std::io::Result<File> {
     let name = CString::new(name.as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid name"))?;
@@ -1158,6 +1207,34 @@ fn open_directory_at(parent: &File, name: &OsStr) -> std::io::Result<File> {
     }
 }
 
+fn sync_directory(directory: &File) -> Result<(), CacheError> {
+    #[cfg(unix)]
+    {
+        directory.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn open_directory_win(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_directory_at(parent: &File, name: &OsStr) -> std::io::Result<File> {
+    let path = path_from_dir_handle(parent)?.join(name);
+    open_directory_win(&path)
+}
+
 fn open_or_create_directory_at(parent: &File, name: &OsStr) -> Result<(File, bool), CacheError> {
     match open_directory_at(parent, name) {
         Ok(directory) => {
@@ -1171,6 +1248,7 @@ fn open_or_create_directory_at(parent: &File, name: &OsStr) -> Result<(File, boo
     }
 }
 
+#[cfg(unix)]
 fn create_directory_at(parent: &File, name: &OsStr) -> Result<File, CacheError> {
     let name_c = CString::new(name.as_bytes()).map_err(|_| CacheError::Corrupt)?;
     if unsafe { libc::mkdirat(parent.as_raw_fd(), name_c.as_ptr(), 0o700) } != 0 {
@@ -1189,6 +1267,16 @@ fn create_directory_at(parent: &File, name: &OsStr) -> Result<File, CacheError> 
     Ok(directory)
 }
 
+#[cfg(windows)]
+fn create_directory_at(parent: &File, name: &OsStr) -> Result<File, CacheError> {
+    let path = path_from_dir_handle(parent)?.join(name);
+    fs::create_dir(&path)?;
+    let directory = open_directory_win(&path)?;
+    validate_directory(&directory.metadata()?)?;
+    Ok(directory)
+}
+
+#[cfg(unix)]
 fn directory_names(directory: &File) -> Result<Vec<OsString>, CacheError> {
     let current = c".";
     let duplicated = unsafe {
@@ -1231,6 +1319,20 @@ fn directory_names(directory: &File) -> Result<Vec<OsString>, CacheError> {
     Ok(names)
 }
 
+#[cfg(windows)]
+fn directory_names(directory: &File) -> Result<Vec<OsString>, CacheError> {
+    let path = path_from_dir_handle(directory)?;
+    let mut names = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name != "." && name != ".." {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
 #[cfg(target_os = "macos")]
 fn errno_pointer() -> *mut libc::c_int {
     unsafe { libc::__error() }
@@ -1241,12 +1343,14 @@ fn errno_pointer() -> *mut libc::c_int {
     unsafe { libc::__errno_location() }
 }
 
+#[cfg(unix)]
 fn set_errno(value: libc::c_int) {
     unsafe {
         *errno_pointer() = value;
     }
 }
 
+#[cfg(unix)]
 fn get_errno() -> libc::c_int {
     unsafe { *errno_pointer() }
 }
@@ -1259,6 +1363,7 @@ fn entry_exists(directory: &File, name: &OsStr) -> Result<bool, CacheError> {
     }
 }
 
+#[cfg(unix)]
 fn metadata_at(directory: &File, name: &OsStr) -> Result<libc::stat, CacheError> {
     let name = CString::new(name.as_bytes()).map_err(|_| CacheError::Corrupt)?;
     let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -1276,6 +1381,12 @@ fn metadata_at(directory: &File, name: &OsStr) -> Result<libc::stat, CacheError>
     Ok(unsafe { metadata.assume_init() })
 }
 
+#[cfg(windows)]
+fn metadata_at(directory: &File, name: &OsStr) -> Result<crate::paths::HostStat, CacheError> {
+    crate::paths::metadata_at(directory, name).map_err(|e| e.into())
+}
+
+#[cfg(unix)]
 fn unlink_file_at(directory: &File, name: &OsStr) -> Result<(), CacheError> {
     let name = CString::new(name.as_bytes()).map_err(|_| CacheError::Corrupt)?;
     if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
@@ -1284,6 +1395,12 @@ fn unlink_file_at(directory: &File, name: &OsStr) -> Result<(), CacheError> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn unlink_file_at(directory: &File, name: &OsStr) -> Result<(), CacheError> {
+    crate::paths::unlink_file_at(directory, name).map_err(|e| e.into())
+}
+
+#[cfg(unix)]
 fn remove_flat_directory_at(parent: &File, name: &OsStr) -> Result<(), CacheError> {
     let directory = open_directory_at(parent, name)?;
     let metadata = directory.metadata()?;
@@ -1305,8 +1422,23 @@ fn remove_flat_directory_at(parent: &File, name: &OsStr) -> Result<(), CacheErro
     Ok(())
 }
 
+#[cfg(windows)]
+fn remove_flat_directory_at(parent: &File, name: &OsStr) -> Result<(), CacheError> {
+    let dir_path = path_from_dir_handle(parent)?.join(name);
+    if dir_path.is_dir() {
+        fs::remove_dir_all(dir_path)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn stat_is_regular(metadata: &libc::stat) -> bool {
-    metadata.st_mode & libc::S_IFMT == libc::S_IFREG
+    metadata.st_mode as i32 & libc::S_IFMT == libc::S_IFREG
+}
+
+#[cfg(windows)]
+fn stat_is_regular(metadata: &crate::paths::HostStat) -> bool {
+    metadata.is_regular
 }
 
 fn inspect_final_directory(directory: &File) -> Result<u64, CacheError> {
@@ -1369,20 +1501,30 @@ fn ensure_no_extra_entries(directory: &File) -> Result<(), CacheError> {
 }
 
 fn validate_directory(metadata: &fs::Metadata) -> Result<(), CacheError> {
+    #[cfg(unix)]
     if !metadata.is_dir()
         || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.permissions().mode() & 0o777 != 0o700
     {
         return Err(CacheError::Corrupt);
     }
+    #[cfg(not(unix))]
+    if !metadata.is_dir() {
+        return Err(CacheError::Corrupt);
+    }
     Ok(())
 }
 
 fn validate_file(metadata: &fs::Metadata) -> Result<(), CacheError> {
+    #[cfg(unix)]
     if !metadata.is_file()
         || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.permissions().mode() & 0o777 != 0o600
     {
+        return Err(CacheError::Corrupt);
+    }
+    #[cfg(not(unix))]
+    if !metadata.is_file() {
         return Err(CacheError::Corrupt);
     }
     Ok(())
@@ -1390,8 +1532,13 @@ fn validate_file(metadata: &fs::Metadata) -> Result<(), CacheError> {
 
 fn validate_identity(metadata: &fs::Metadata, expected: (u64, u64)) -> Result<(), CacheError> {
     validate_directory(metadata)?;
+    #[cfg(unix)]
     if (metadata.dev(), metadata.ino()) != expected {
         return Err(CacheError::Corrupt);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = expected;
     }
     Ok(())
 }
@@ -1475,6 +1622,37 @@ fn rename_noreplace(
     map_rename_result(result)
 }
 
+#[cfg(windows)]
+fn rename_noreplace(
+    old_directory: &File,
+    old_name: &OsStr,
+    new_directory: &File,
+    new_name: &OsStr,
+) -> Result<(), CacheError> {
+    use std::os::windows::ffi::OsStrExt;
+    let old_path = path_from_dir_handle(old_directory)?.join(old_name);
+    let new_path = path_from_dir_handle(new_directory)?.join(new_name);
+    let old_wide: Vec<u16> = old_path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let new_wide: Vec<u16> = new_path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let success = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+            old_wide.as_ptr(),
+            new_wide.as_ptr(),
+            0,
+        )
+    };
+    if success != 0 {
+        Ok(())
+    } else {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::AlreadyExists || err.raw_os_error() == Some(183) {
+            Err(CacheError::AlreadyPublished)
+        } else {
+            Err(err.into())
+        }
+    }
+}
+
 fn map_rename_result(result: libc::c_int) -> Result<(), CacheError> {
     if result == 0 {
         return Ok(());
@@ -1487,7 +1665,7 @@ fn map_rename_result(result: libc::c_int) -> Result<(), CacheError> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::cell::RefCell;
     use std::os::unix::fs::{DirBuilderExt, symlink};

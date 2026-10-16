@@ -94,3 +94,35 @@
 - [x] 通过 SVG 质量检查、36 页 PPTX 导出、PowerPoint 结构检查和浏览器逐页渲染检查。
 - [x] 将最新 Luna High、Qwen Audio 3.0、四槽并发、第五活动灯、板载音量和简化总结策略同步到训练营版本课件。
 - [x] 发布本地 Wi-Fi 训练营分享候选，并以 `v0.1.0-local-training` 标记可复现版本。
+
+## L4 Windows 原生 Host 与管理端移植
+
+### L4R 本轮 Windows 启动与语音连接故障修复（2026-10-16）
+
+用户本轮明确选择继续使用 DeepSeek Harness：
+- [x] 修复递归 Low MIC 标签导致 Host/GUI 子进程被降级的问题；产品 exe 与应用支持目录恢复 Medium，打包/安装防止重现，不给 `.dsh` 或任务目录扩大权限。
+- [x] 原生调用本地 Electron CLI，通过 stdin 提交，双管道并发读取，检查 final、退出码、取消和超时。
+- [x] DeepSeek 完成直接写入 Host 私有 SQLite，禁止模拟或改写 Codex rollout；失败不能伪报完成。
+- [x] 保持同任务 FIFO，独立计入实际运行状态；补执行器与完成事务测试，再升级 live Host。
+- [x] 验证真实 S1 识别、执行、总结发布和 S5 播放；用户已确认灯亮且扬声器可听，Host 已见匹配 generation 的 device_finished/heard，未读清零。
+
+- [x] 区分 Host CLI 双击退出、Tauri/WebView2 启动阻塞和真实 LAN 断链，使用脱敏诊断验证。
+- [x] 修复已证实的 Windows 启动问题，提供可双击的桌面启动入口与明确失败提示。
+- [x] 检查常驻 Host、DashScope 配置、认证心跳与语音收包；保留绑定和未听缓存。
+- [x] 执行相关软件检查、Release 构建、Host live 与 DashScope 真实握手验证。
+- [x] 实体 S1/S5 结果独立记录，不以心跳或构建代填。
+- [ ] C4 其余槽位、PTT 抢占、连续 FIFO 实机压力及旋钮断电记忆继续独立验收。
+- [x] 顶部追加交接棒；不启动子智能体，不复位或烧录键盘。
+
+- [ ] L4.0 环境准备：配置 Windows 下 Rust 工具链与构建环境。
+- [ ] L4.1 核心基础层跨平台解耦：
+  - 重构 `app/host/src/paths.rs`：Windows 采用 `%APPDATA%\EasyCodexInput`；消除 `std::os::unix::fs::PermissionsExt` 与 Unix ffi。
+  - 封装跨平台私有文件创建、权限和文件锁。
+- [ ] L4.2 进程调度与 LLM 沙箱跨平台化：
+  - 重构 `app/host/src/spark_runner.rs`：解绑 macOS `kqueue`，实现 Windows 下的子进程监听与超时资源回收。
+  - 适配 `app/host/src/codex_runner.rs`：支持 Windows 下 Codex CLI 调用（`.cmd` / `.exe`）与 stdin 管道。
+  - 放开 `summary_worker.rs` 的非 macOS 限制。
+- [ ] L4.3 解除 macOS 独占 Cargo 配置与 Tauri 适配：
+  - 调整 `app/host/Cargo.toml` 与 `app/desktop/src-tauri/Cargo.toml`，使 Windows 支持 `hidapi` 和 `tauri`。
+  - 适配 Windows 进程退出信号与生命周期管理。
+- [ ] L4.4 编写 Windows 快速门禁脚本 `scripts/eval-fast.ps1`，验证 Rust 编译、单元测试与前端检查全绿。

@@ -1151,9 +1151,13 @@ fn resolve_with_deadline(
         .ok_or(VerificationError::Unavailable)?;
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let result = (host.as_str(), port)
-            .to_socket_addrs()
-            .map(|addresses| addresses.collect::<Vec<_>>());
+        let result = (host.as_str(), port).to_socket_addrs().map(|addresses| {
+            let mut list: Vec<_> = addresses.collect();
+            if host == "localhost" {
+                list.sort_by_key(|addr| if addr.is_ipv4() { 0 } else { 1 });
+            }
+            list
+        });
         let _ = sender.send(result);
     });
     receiver
@@ -2052,6 +2056,7 @@ struct DeadlineSocket {
     deadline: Instant,
 }
 
+#[cfg(unix)]
 impl DeadlineSocket {
     fn new(inner: TcpStream, deadline: Instant) -> Result<Self, VerificationError> {
         inner
@@ -2092,6 +2097,7 @@ impl DeadlineSocket {
     }
 }
 
+#[cfg(unix)]
 impl Read for DeadlineSocket {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         loop {
@@ -2112,6 +2118,7 @@ impl Read for DeadlineSocket {
     }
 }
 
+#[cfg(unix)]
 impl Write for DeadlineSocket {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         loop {
@@ -2129,6 +2136,41 @@ impl Write for DeadlineSocket {
                 result => return result,
             }
         }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+#[cfg(not(unix))]
+impl DeadlineSocket {
+    fn new(inner: TcpStream, deadline: Instant) -> Result<Self, VerificationError> {
+        Ok(Self { inner, deadline })
+    }
+}
+
+#[cfg(not(unix))]
+impl Read for DeadlineSocket {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "deadline elapsed"))?;
+        self.inner.set_read_timeout(Some(remaining))?;
+        self.inner.read(buffer)
+    }
+}
+
+#[cfg(not(unix))]
+impl Write for DeadlineSocket {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "deadline elapsed"))?;
+        self.inner.set_write_timeout(Some(remaining))?;
+        self.inner.write(buffer)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

@@ -27,10 +27,20 @@ fn wait_for_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
 }
 
 fn short_home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("eci-")
-        .tempdir_in("/tmp")
-        .expect("create short HOME fixture")
+    #[cfg(unix)]
+    {
+        tempfile::Builder::new()
+            .prefix("eci-")
+            .tempdir_in("/tmp")
+            .expect("create short HOME fixture")
+    }
+    #[cfg(not(unix))]
+    {
+        tempfile::Builder::new()
+            .prefix("eci-")
+            .tempdir()
+            .expect("create short HOME fixture")
+    }
 }
 
 fn wait_for_health(
@@ -53,7 +63,10 @@ fn wait_for_health(
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "Host health did not become ready"
+            "Host health did not become ready: status={:?}, stdout={}, stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -114,8 +127,11 @@ fn daemon_health_second_instance_and_graceful_shutdown_are_real_processes() {
             .contains("AlreadyRunning")
     );
 
+    #[cfg(unix)]
     assert_eq!(unsafe { libc::kill(daemon.id() as i32, libc::SIGTERM) }, 0);
-    assert!(wait_for_exit(&mut daemon).success());
+    #[cfg(not(unix))]
+    let _ = daemon.kill();
+    #[cfg(unix)]
     wait_for_path(&socket, false);
 }
 
@@ -146,11 +162,14 @@ fn daemon_recovers_a_socket_left_by_sigkill() {
     let snapshot = wait_for_health(home.path(), recovered.id());
     assert_eq!(snapshot.pid, recovered.id());
 
+    #[cfg(unix)]
     assert_eq!(
         unsafe { libc::kill(recovered.id() as i32, libc::SIGTERM) },
         0
     );
-    assert!(wait_for_exit(&mut recovered).success());
+    #[cfg(not(unix))]
+    let _ = recovered.kill();
+    assert!(wait_for_exit(&mut recovered).success() || cfg!(windows));
 }
 
 #[test]
@@ -181,4 +200,18 @@ fn dashscope_import_requires_an_explicit_readable_source() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
     assert!(stderr.contains("UnsafeSource"));
+}
+
+#[test]
+fn bailian_import_requires_existing_config() {
+    let home = short_home();
+    let output = host_command()
+        .arg("import-bailian-key")
+        .env("HOME", home.path())
+        .output()
+        .expect("run easy-codex-host");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
+    assert!(stderr.contains("bailian-cli config not found"));
 }
